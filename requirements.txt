@@ -1,4 +1,5 @@
-pysqlite3
+protobuf==3.20.3
+libsqlite3-dev
 chromadb 
 langchain-chroma
 streamlit
@@ -12,7 +13,6 @@ langchain-community
 langchain-openai
 langchain-experimental
 langchain-cohere
-protobuf==3.20.3
 openai
 requests
 scikit-learn
