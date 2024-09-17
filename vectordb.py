@@ -1,3 +1,7 @@
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriever
@@ -19,10 +23,6 @@ from umap import UMAP
 from sklearn.manifold import TSNE
 from sklearn.metrics.pairwise import cosine_similarity
 import streamlit as st
-
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
 os.environ["COHERE_API_KEY"] = st.secrets['COHERE_API_KEY']
 
