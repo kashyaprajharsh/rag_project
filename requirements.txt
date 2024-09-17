@@ -1,6 +1,7 @@
 rapidocr-onnxruntime
 chromadb 
 langchain-chroma
+sqlite3==3.35.0
 streamlit
 pandas
 numpy
