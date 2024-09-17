@@ -11,6 +11,7 @@ langchain-openai
 langchain-experimental
 langchain-chroma
 langchain-cohere
+protobuf==3.20.3
 openai
 requests
 scikit-learn
