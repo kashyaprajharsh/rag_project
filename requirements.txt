@@ -1,15 +1,15 @@
 rapidocr-onnxruntime
+chromadb 
+langchain-chroma
 streamlit
 pandas
 numpy
 plotly
 pillow
 langchain
-chromadb
 langchain-community
 langchain-openai
 langchain-experimental
-langchain-chroma
 langchain-cohere
 protobuf==3.20.3
 openai
