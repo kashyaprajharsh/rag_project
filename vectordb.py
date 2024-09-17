@@ -20,6 +20,10 @@ from sklearn.manifold import TSNE
 from sklearn.metrics.pairwise import cosine_similarity
 import streamlit as st
 
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
 os.environ["COHERE_API_KEY"] = st.secrets['COHERE_API_KEY']
 
 def create_vectorstore(splits, batch_size=5000, use_hyde=False, api_key=None):
