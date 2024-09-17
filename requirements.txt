@@ -1,5 +1,5 @@
 protobuf==3.20.3
-libsqlite3-dev
+pysqlite3-binary
 chromadb 
 langchain-chroma
 streamlit
