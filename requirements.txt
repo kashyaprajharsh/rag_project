@@ -27,6 +27,7 @@ pacmap
 matplotlib
 seaborn
 graphviz
+rank_bm25
 datashader
 wordcloud
 validators
