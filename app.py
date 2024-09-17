@@ -28,6 +28,8 @@ import logging
 import sys
 import validators
 from typing import Any, List, Dict
+from itertools import combinations
+import difflib
 
 
 # Setup Logging
@@ -75,8 +77,6 @@ def initialize_session_state() -> None:
     for key, value in default_state.items():
         if key not in st.session_state:
             st.session_state[key] = value
-
-initialize_session_state()
 
 # Caching Expensive Functions
 @st.cache_data(show_spinner=False)
@@ -241,6 +241,22 @@ def display_splitting_results(results: Dict[str, Any]) -> None:
         ]
 
     st.dataframe(metrics_df)
+
+    
+
+    # Add a detailed explanation of each metric
+    st.subheader("Metric Explanations")
+    st.markdown("""
+    - **Avg Chunk Size (chars)**: The average number of characters in each chunk.
+    - **Chunk Size Std Dev (chars)**: The standard deviation of chunk sizes, indicating how much chunk sizes typically deviate from the average.
+    - **Coefficient of Variation**: The ratio of the standard deviation to the mean, useful for comparing variability between splitters with different average chunk sizes. Lower values indicate more consistent chunk sizes.
+    - **Chunk Count**: The total number of chunks produced by the splitter.
+    - **Content Preservation (%)**: The percentage of original content (based on word frequency) preserved after splitting. Higher is better.
+    - **Vocabulary Retention (%)**: The percentage of unique words from the original text retained in the split chunks. Higher is better.
+    - **Processing Time (s)**: The time taken to perform the splitting operation, in seconds.
+    - **Semantic Coherence**: (For semantic splitter only) A measure of how semantically related adjacent chunks are. Higher values indicate better semantic coherence.
+    """)
+
 
     st.subheader("Chunk Size Distribution")
     hist_data = []
@@ -487,6 +503,68 @@ def text_splitting_page() -> None:
                 st.session_state.recommended_splitter = min(
                     results, key=lambda x: results[x]["coefficient_of_variation"]
                 )
+
+                # Display chunks for both single and multiple splitters
+                st.subheader("Chunk Comparison")
+                
+                # Determine the number of chunks to display
+                num_chunks = min(5, min(len(results[splitter]['splits']) for splitter in selected_splitters))
+                
+                for i in range(num_chunks):
+                    with st.expander(f"Chunk {i+1}"):
+                        # Create tabs for different views
+                        tab_full, tab_diff = st.tabs(["Full Content", "Differences"])
+                        
+                        with tab_full:
+                            # Display full content of each chunk
+                            for splitter in selected_splitters:
+                                st.markdown(f"**{splitter} splitter:**")
+                                st.text_area(
+                                    f"{splitter} chunk content",
+                                    results[splitter]['splits'][i].page_content,
+                                    height=200,
+                                    key=f"{splitter}_chunk_{i}"
+                                )
+                        
+                        with tab_diff:
+                            if len(selected_splitters) > 1:
+                                # Add color legend and explanation
+                                st.markdown("""
+                                **Color Legend:**
+                                <span style="background-color: #aaffaa;">Green</span>: Text present in the second splitter but not in the first
+                                <span style="background-color: #ffaaaa;">Red</span>: Text present in the first splitter but not in the second
+                                <span style="background-color: #ffffaa;">Yellow</span>: Minor changes or differences in whitespace
+                                
+                                The differences shown below compare each pair of splitters. Lines without coloring are identical between the two splitters being compared.
+                                """, unsafe_allow_html=True)
+                                
+                                st.markdown("---")
+
+                                # Create pairwise comparisons
+                                for j, (splitter1, splitter2) in enumerate(combinations(selected_splitters, 2)):
+                                    st.markdown(f"**Difference between {splitter1} and {splitter2}:**")
+                                    
+                                    d = difflib.Differ()
+                                    diff = list(d.compare(results[splitter1]['splits'][i].page_content.splitlines(), 
+                                                          results[splitter2]['splits'][i].page_content.splitlines()))
+                                    
+                                    # Color-code the differences
+                                    html_diff = []
+                                    for line in diff:
+                                        if line.startswith('+'):
+                                            html_diff.append(f'<span style="background-color: #aaffaa;">{line}</span>')
+                                        elif line.startswith('-'):
+                                            html_diff.append(f'<span style="background-color: #ffaaaa;">{line}</span>')
+                                        elif line.startswith('?'):
+                                            html_diff.append(f'<span style="background-color: #ffffaa;">{line}</span>')
+                                        else:
+                                            html_diff.append(line)
+                                    
+                                    st.markdown('<br>'.join(html_diff), unsafe_allow_html=True)
+                                    st.markdown("---")
+                            else:
+                                st.info("Select more than one splitter to see differences.")
+
             except Exception as e:
                 handle_error(e, "Error processing PDF")
 
@@ -837,7 +915,8 @@ def main() -> None:
     # Add OpenAI API Key input in the sidebar
     with st.sidebar:
         st.markdown("## OpenAI API Key")
-        api_key = st.text_input("Enter your OpenAI API Key:", type="password")
+        api_key = st.text_input("Enter your OpenAI API Key:", type="password", key="openai_api_key_input")
+
         if api_key:
             st.success("API Key provided!")
             st.session_state.api_key = api_key  # Store the API key in session state
@@ -902,4 +981,5 @@ def main() -> None:
                     st.error("Please complete the current step before proceeding.")
 
 if __name__ == "__main__":
+    initialize_session_state()
     main()
