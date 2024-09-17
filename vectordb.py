@@ -50,11 +50,12 @@ def create_vectorstore(splits, batch_size=5000, use_hyde=False, api_key=None):
         embeddings = OpenAIEmbeddings(openai_api_key=api_key)
         vectorstore = Chroma(embedding_function=embeddings)
     
+    # Add unique IDs to all documents before batching
+    for idx, doc in enumerate(splits):
+        doc.metadata["unique_id"] = f"doc_{idx}"
+    
     for i in range(0, len(splits), batch_size):
         batch = splits[i:i + batch_size]
-        # Add unique IDs to metadata
-        for idx, doc in enumerate(batch):
-            doc.metadata["unique_id"] = f"doc_{i + idx}"
         vectorstore.add_documents(documents=batch)
     
     return vectorstore
