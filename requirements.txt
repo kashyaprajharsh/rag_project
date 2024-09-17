@@ -16,7 +16,7 @@ rapidocr-onnxruntime
 langchain-openai
 langchain-experimental
 langchain-chroma
-chromadb
+chromadb==0.4.0
 langchain-cohere
 pysqlite3-binary
 openai
