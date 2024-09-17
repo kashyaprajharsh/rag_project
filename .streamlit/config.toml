@@ -1,0 +1,20 @@
+[theme]
+primaryColor = "#1E88E5"
+backgroundColor = "#F0F2F6"
+secondaryBackgroundColor = "#D3D3D3"
+textColor = "#333333"
+font = "sans serif"
+    
+[server]
+enableCORS = false
+enableXsrfProtection = true
+    
+[browser]
+gatherUsageStats = false
+
+# Custom Colors for Alerts and Status
+[theme.colors]
+success = "#43A047"
+warning = "#FFA000"
+danger = "#E53935"
+accent = "#FF7043"
