@@ -30,9 +30,6 @@ import validators
 from typing import Any, List, Dict
 
 
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 # Setup Logging
 def setup_logger() -> logging.Logger:
     logger = logging.getLogger("rag_explorer")
