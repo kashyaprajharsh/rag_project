@@ -1,4 +1,4 @@
-pysqlite3==3.0.5.3
+pysqlite3
 chromadb 
 langchain-chroma
 streamlit
