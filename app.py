@@ -19,7 +19,7 @@ from vectordb import (
     create_embedding_visualization,
 )
 from rag import generate_all_rag_answers, RAG_TYPES
-from visual import visualize_all_results
+# from visual import visualize_all_results
 from streamlit_option_menu import option_menu
 from functools import partial
 import matplotlib.pyplot as plt

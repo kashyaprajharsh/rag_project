@@ -17,6 +17,7 @@ langchain-openai
 langchain-experimental
 langchain-chroma
 chromadb
+pysqlite3-binary
 langchain-cohere
 openai
 requests
