@@ -1,4 +1,4 @@
-rapidocr-onnxruntime
+pysqlite3==3.0.5.3
 chromadb 
 langchain-chroma
 streamlit
@@ -7,6 +7,7 @@ numpy
 plotly
 pillow
 langchain
+rapidocr-onnxruntime
 langchain-community
 langchain-openai
 langchain-experimental
