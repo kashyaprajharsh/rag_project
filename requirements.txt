@@ -31,3 +31,4 @@ wordcloud
 validators
 extra-streamlit-components
 streamlit-option-menu
+protobuf==3.20.3
