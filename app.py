@@ -19,7 +19,6 @@ from vectordb import (
     create_embedding_visualization,
 )
 from rag import generate_all_rag_answers, RAG_TYPES
-# from visual import visualize_all_results
 from streamlit_option_menu import option_menu
 from functools import partial
 import matplotlib.pyplot as plt
@@ -30,8 +29,15 @@ import validators
 from typing import Any, List, Dict
 from itertools import combinations
 import difflib
-from uuid import uuid4
 
+
+# Configure Streamlit Page
+st.set_page_config(
+    layout="wide",
+    page_title="RAGExplorer",
+    page_icon="🔍",
+    initial_sidebar_state="expanded",
+)
 
 # Setup Logging
 def setup_logger() -> logging.Logger:
@@ -53,14 +59,6 @@ def setup_logger() -> logging.Logger:
 
 logger = setup_logger()
 
-# Configure Streamlit Page
-st.set_page_config(
-    layout="wide",
-    page_title="RAGExplorer",
-    page_icon="🔍",
-    initial_sidebar_state="expanded",
-)
-
 # Initialize Session State with Default Values
 def initialize_session_state() -> None:
     default_state = {
@@ -74,31 +72,23 @@ def initialize_session_state() -> None:
         "api_key": "",  # Initialized as empty string
         "recommended_splitter": None,
         "use_hyde": False,
+        "retriever_created": False,  # New state variable
+        "retrieval_done": False,
+        "query": "",
+        "current_retriever_type": "",
     }
     for key, value in default_state.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
-# Caching Expensive Functions
-@st.cache_data(show_spinner=False)
-def cached_load_pdf_data(pdf_paths: List[str], method: str) -> Any:
-    return load_pdf_data(pdf_paths, method=method)
+logger.info("Starting application...")
 
-@st.cache_resource(show_spinner=False)
-def cached_create_vectorstore(
-    _splits: List[Any], batch_size: int, use_hyde: bool, api_key: str
-) -> Any:
-    # Generate UUIDs for all documents
-    uuids = [str(uuid4()) for _ in range(len(_splits))]
-    
-    vectorstore = create_vectorstore(
-        _splits, batch_size=batch_size, use_hyde=use_hyde, api_key=api_key
-    )
-    
-    # Store the UUIDs in the session state for potential future use
-    st.session_state.document_uuids = uuids
-    
-    return vectorstore
+# Caching and Helper Functions (Same as provided earlier)
+# ... [Include all your existing helper functions here] ...
+
+
+
+
 
 # Centralized Error Handling
 def handle_error(e: Exception, user_message: str = "An error occurred") -> None:
@@ -302,7 +292,8 @@ def display_splitting_results(results: Dict[str, Any]) -> None:
                 f"Based on {metric}, the recommended splitter is: **{recommended_splitter}**"
             )
 
-# Page: Home
+
+# Define Pages
 def home_page() -> None:
     st.header("Welcome to RAGExplorer")
     st.write(
@@ -331,11 +322,6 @@ def home_page() -> None:
             """
         )
 
-    if st.button("Start Exploring", key="start_exploring_home"):
-        st.session_state.current_step = 1
-        st.rerun()
-
-# Page: PDF Loading
 def pdf_loading_page() -> None:
     st.header("📄 PDF Loading")
 
@@ -382,7 +368,7 @@ def pdf_loading_page() -> None:
         if pdf_paths:
             with st.spinner("Loading PDFs..."):
                 try:
-                    data = cached_load_pdf_data(
+                    data = load_pdf_data(
                         pdf_paths, method=loading_method.lower().replace(" ", "_")
                     )
                     st.session_state.pdf_data = data
@@ -396,7 +382,6 @@ def pdf_loading_page() -> None:
         else:
             st.error("❗ Please provide valid PDF source(s).")
 
-# Page: Text Splitting
 def text_splitting_page() -> None:
     st.header("✂️ Text Splitting")
 
@@ -515,15 +500,15 @@ def text_splitting_page() -> None:
 
                 # Display chunks for both single and multiple splitters
                 st.subheader("Chunk Comparison")
-                
+
                 # Determine the number of chunks to display
                 num_chunks = min(5, min(len(results[splitter]['splits']) for splitter in selected_splitters))
-                
+
                 for i in range(num_chunks):
                     with st.expander(f"Chunk {i+1}"):
                         # Create tabs for different views
                         tab_full, tab_diff = st.tabs(["Full Content", "Differences"])
-                        
+
                         with tab_full:
                             # Display full content of each chunk
                             for splitter in selected_splitters:
@@ -534,7 +519,7 @@ def text_splitting_page() -> None:
                                     height=200,
                                     key=f"{splitter}_chunk_{i}"
                                 )
-                        
+
                         with tab_diff:
                             if len(selected_splitters) > 1:
                                 # Add color legend and explanation
@@ -543,20 +528,20 @@ def text_splitting_page() -> None:
                                 <span style="background-color: #aaffaa;">Green</span>: Text present in the second splitter but not in the first
                                 <span style="background-color: #ffaaaa;">Red</span>: Text present in the first splitter but not in the second
                                 <span style="background-color: #ffffaa;">Yellow</span>: Minor changes or differences in whitespace
-                                
+
                                 The differences shown below compare each pair of splitters. Lines without coloring are identical between the two splitters being compared.
                                 """, unsafe_allow_html=True)
-                                
+
                                 st.markdown("---")
 
                                 # Create pairwise comparisons
                                 for j, (splitter1, splitter2) in enumerate(combinations(selected_splitters, 2)):
                                     st.markdown(f"**Difference between {splitter1} and {splitter2}:**")
-                                    
+
                                     d = difflib.Differ()
-                                    diff = list(d.compare(results[splitter1]['splits'][i].page_content.splitlines(), 
+                                    diff = list(d.compare(results[splitter1]['splits'][i].page_content.splitlines(),
                                                           results[splitter2]['splits'][i].page_content.splitlines()))
-                                    
+
                                     # Color-code the differences
                                     html_diff = []
                                     for line in diff:
@@ -568,7 +553,7 @@ def text_splitting_page() -> None:
                                             html_diff.append(f'<span style="background-color: #ffffaa;">{line}</span>')
                                         else:
                                             html_diff.append(line)
-                                    
+
                                     st.markdown('<br>'.join(html_diff), unsafe_allow_html=True)
                                     st.markdown("---")
                             else:
@@ -577,6 +562,10 @@ def text_splitting_page() -> None:
             except Exception as e:
                 handle_error(e, "Error processing PDF")
 
+
+
+
+# Page: Retriever
 # Page: Retriever
 def retriever_page() -> None:
     st.header("🔍 Vector Store and Retriever")
@@ -623,21 +612,23 @@ def retriever_page() -> None:
                 splits = st.session_state.split_results[
                     st.session_state.recommended_splitter
                 ]
-                vectorstore = cached_create_vectorstore(
-                    _splits=splits,  # Changed from splits to _splits
+                vectorstore = create_vectorstore(
+                    splits=splits,
                     batch_size=batch_size,
                     use_hyde=use_hyde,
                     api_key=st.session_state.get("api_key"),
                 )
                 st.session_state.vectorstore = vectorstore
                 st.session_state.use_hyde = use_hyde
+                st.session_state.vector_store_created = True  # Track vector store creation
                 st.success(
                     f"{'HYDE ' if use_hyde else ''}Vector Store created successfully!"
                 )
             except Exception as e:
                 handle_error(e, "Error creating vector store")
 
-    if "vectorstore" in st.session_state:
+    # Show retriever settings only if vector store is created
+    if st.session_state.get("vector_store_created", False):
         st.subheader("Retriever Settings")
         retriever_type = st.selectbox(
             "Retriever type",
@@ -730,108 +721,109 @@ def retriever_page() -> None:
                     st.success(
                         f"{'HYDE ' if st.session_state.use_hyde else ''}Vector Store and {retriever_type} Retriever created successfully!"
                     )
+                    st.session_state.retriever_created = True  # Track retriever creation
                 except Exception as e:
                     handle_error(e, "Error creating retriever")
 
-        if "base_retriever" in st.session_state:
-            st.subheader("Test Retriever")
-            query = st.text_input(
-                "Enter a query to test the retriever:", key="retriever_query"
-            )
-            if st.button("Retrieve", key="retrieve_button"):
-                if not query.strip():
-                    st.error("❗ Please enter a valid query.")
-                else:
-                    st.session_state.query = query
-                    st.session_state.retrieval_done = True
-                    st.rerun()
+    # Show test options if retriever is created
+    if st.session_state.get("retriever_created", False):
+        st.subheader("Test Retriever")
+        query = st.text_input(
+            "Enter a query to test the retriever:", key="retriever_query"
+        )
+        if st.button("Retrieve", key="retrieve_button"):
+            if not query.strip():
+                st.error("❗ Please enter a valid query.")
+            else:
+                st.session_state.query = query
+                st.session_state.retrieval_done = True
 
-            if st.session_state.get("retrieval_done", False):
-                query = st.session_state.query
-                with st.spinner("Retrieving documents..."):
-                    try:
-                        base_docs = retrieve_documents(
-                            st.session_state.base_retriever, query
-                        )
+        if st.session_state.get("retrieval_done", False):
+            query = st.session_state.query
+            with st.spinner("Retrieving documents..."):
+                try:
+                    base_docs = retrieve_documents(
+                        st.session_state.base_retriever, query
+                    )
 
-                        comparison_docs = []
+                    comparison_docs = []
+                    if st.session_state.current_retriever_type != "Vector Store":
+                        if st.session_state.current_retriever_type == "Reranker":
+                            comparison_docs = retrieve_documents(
+                                st.session_state.reranker_retriever, query
+                            )
+                        elif st.session_state.current_retriever_type == "Hybrid":
+                            comparison_docs = retrieve_documents(
+                                st.session_state.hybrid_retriever, query
+                            )
+                        elif st.session_state.current_retriever_type == "Hybrid Reranker":
+                            comparison_docs = retrieve_documents(
+                                st.session_state.hybrid_reranker_retriever, query
+                            )
+
+                    st.subheader("Retrieved Documents")
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.markdown("### Base Retriever")
+                        display_retrieved_docs(base_docs, "Base Retriever")
+
+                    with col2:
                         if st.session_state.current_retriever_type != "Vector Store":
-                            if st.session_state.current_retriever_type == "Reranker":
-                                comparison_docs = retrieve_documents(
-                                    st.session_state.reranker_retriever, query
+                            st.markdown(
+                                f"### {st.session_state.current_retriever_type}"
+                            )
+                            display_retrieved_docs(
+                                comparison_docs, st.session_state.current_retriever_type
+                            )
+                        else:
+                            st.markdown("### Comparison")
+                            st.info(
+                                "No comparison retriever selected. Using Vector Store only."
+                            )
+
+                    st.subheader("Embedding Visualization")
+                    method = st.selectbox(
+                        "Choose visualization method", ["pacmap", "umap", "tsne"]
+                    )
+                    dimensions = st.radio("Choose dimensions", [2, 3])
+                    sample_size = st.number_input(
+                        "Sample size (leave 0 for all)",
+                        min_value=0,
+                        max_value=10000,
+                        value=0,
+                        step=100,
+                    )
+
+                    if st.button("Show Embedding Visualization", key="show_embedding_viz_button"):
+                        with st.spinner("Creating embedding visualization..."):
+                            try:
+                                retrieved_docs = {"Base": base_docs}
+                                if st.session_state.current_retriever_type != "Vector Store":
+                                    retrieved_docs[
+                                        st.session_state.current_retriever_type
+                                    ] = comparison_docs
+
+                                fig = create_embedding_visualization(
+                                    st.session_state.vectorstore,
+                                    st.session_state.split_results[
+                                        st.session_state.recommended_splitter
+                                    ],
+                                    query,
+                                    retrieved_docs,
+                                    method=method,
+                                    sample_size=sample_size if sample_size > 0 else None,
+                                    dimensions=dimensions,
+                                    api_key=st.session_state.get("api_key"),
                                 )
-                            elif st.session_state.current_retriever_type == "Hybrid":
-                                comparison_docs = retrieve_documents(
-                                    st.session_state.hybrid_retriever, query
-                                )
-                            elif st.session_state.current_retriever_type == "Hybrid Reranker":
-                                comparison_docs = retrieve_documents(
-                                    st.session_state.hybrid_reranker_retriever, query
-                                )
+                                st.plotly_chart(fig)
+                            except Exception as e:
+                                handle_error(e, "Error creating embedding visualization")
+                except Exception as e:
+                    handle_error(e, "Error retrieving documents")
 
-                        st.subheader("Retrieved Documents")
 
-                        col1, col2 = st.columns(2)
-
-                        with col1:
-                            st.markdown("### Base Retriever")
-                            display_retrieved_docs(base_docs, "Base Retriever")
-
-                        with col2:
-                            if st.session_state.current_retriever_type != "Vector Store":
-                                st.markdown(
-                                    f"### {st.session_state.current_retriever_type}"
-                                )
-                                display_retrieved_docs(
-                                    comparison_docs, st.session_state.current_retriever_type
-                                )
-                            else:
-                                st.markdown("### Comparison")
-                                st.info(
-                                    "No comparison retriever selected. Using Vector Store only."
-                                )
-
-                        st.subheader("Embedding Visualization")
-                        method = st.selectbox(
-                            "Choose visualization method", ["pacmap", "umap", "tsne"]
-                        )
-                        dimensions = st.radio("Choose dimensions", [2, 3])
-                        sample_size = st.number_input(
-                            "Sample size (leave 0 for all)",
-                            min_value=0,
-                            max_value=10000,
-                            value=0,
-                            step=100,
-                        )
-
-                        if st.button("Show Embedding Visualization", key="show_embedding_viz_button"):
-                            with st.spinner("Creating embedding visualization..."):
-                                try:
-                                    retrieved_docs = {"Base": base_docs}
-                                    if st.session_state.current_retriever_type != "Vector Store":
-                                        retrieved_docs[
-                                            st.session_state.current_retriever_type
-                                        ] = comparison_docs
-
-                                    fig = create_embedding_visualization(
-                                        st.session_state.vectorstore,
-                                        st.session_state.split_results[
-                                            st.session_state.recommended_splitter
-                                        ],
-                                        query,
-                                        retrieved_docs,
-                                        method=method,
-                                        sample_size=sample_size if sample_size > 0 else None,
-                                        dimensions=dimensions,
-                                        api_key=st.session_state.get("api_key"),
-                                    )
-                                    st.plotly_chart(fig)
-                                except Exception as e:
-                                    handle_error(e, "Error creating embedding visualization")
-                    except Exception as e:
-                        handle_error(e, "Error retrieving documents")
-
-# Page: RAG Chain
 def rag_chain_page() -> None:
     st.header("🔗 RAG Chain")
 
@@ -901,23 +893,8 @@ def rag_chain_page() -> None:
 
         st.rerun()
 
-# Check if user can proceed to the next step
-def can_proceed(current_step: int) -> bool:
-    if current_step == 0:  # Home page
-        return True
-    elif current_step == 1:  # PDF Loading
-        return st.session_state.get("pdf_loaded", False)
-    elif current_step == 2:  # Text Splitting
-        return "split_results" in st.session_state
-    elif current_step == 3:  # Retriever
-        return "vectorstore" in st.session_state and st.session_state.get("api_key")
-    else:
-        return st.session_state.get("api_key")
-
 # Main Function
 def main() -> None:
-    logger.info("Application started.")
-
     st.title("🔍 RAGExplorer")
     st.markdown("Explore the inner workings of Retrieval-Augmented Generation (RAG)")
 
@@ -934,22 +911,22 @@ def main() -> None:
 
         st.markdown("---")
 
-        # Sidebar Navigation
-        st.markdown("## Navigation")
+        # Sidebar Navigation using option_menu
+        steps = ["Home", "PDF Loading", "Text Splitting", "Retriever", "RAG Chain"]
         selected = option_menu(
             menu_title=None,
-            options=["Home", "PDF Loading", "Text Splitting", "Retriever", "RAG Chain"],
+            options=steps,
             icons=["house", "file-pdf", "scissors", "search", "link"],
             menu_icon="cast",
             default_index=st.session_state.current_step,
         )
 
-        # Add some space
-        st.markdown("---")
+        # Update current_step based on sidebar selection
+        if st.session_state.current_step != steps.index(selected):
+            st.session_state.current_step = steps.index(selected)
 
-        # Steps and Progress Indicator
-        steps = ["Home", "PDF Loading", "Text Splitting", "Retriever", "RAG Chain"]
-        current_step = steps.index(selected)
+        # Progress Indicator based on selected page
+        current_step = st.session_state.current_step
         st.progress((current_step + 1) / len(steps), f"Step {current_step + 1} of {len(steps)}")
 
         # About Section
@@ -961,7 +938,7 @@ def main() -> None:
                 "Navigate through the steps to explore each component of the RAG process."
             )
 
-    # Display the selected page
+    # Define pages
     pages = {
         "Home": home_page,
         "PDF Loading": pdf_loading_page,
@@ -969,21 +946,37 @@ def main() -> None:
         "Retriever": retriever_page,
         "RAG Chain": rag_chain_page,
     }
-    pages[selected]()
 
-    # Navigation Buttons (Optional - Since navigation is handled via sidebar)
-    # This section can be removed or retained based on user preference.
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col1:
+    # Display the selected page
+    pages[steps[current_step]]()
+
+    # Navigation Buttons
+    st.markdown("---")
+    col_prev, col_center, col_next = st.columns([1, 2, 1])
+
+    with col_prev:
         if current_step > 0:
             if st.button("⬅️ Previous"):
                 st.session_state.current_step -= 1
                 st.rerun()
 
-    with col3:
+    with col_next:
         if current_step < len(steps) - 1:
+            # Determine if the user can proceed to the next step
+            can_proceed = False
+            if current_step == 0:  # Home
+                can_proceed = True
+            elif current_step == 1:  # PDF Loading
+                can_proceed = st.session_state.get("pdf_loaded", False)
+            elif current_step == 2:  # Text Splitting
+                can_proceed = "split_results" in st.session_state
+            elif current_step == 3:  # Retriever
+                can_proceed = "vectorstore" in st.session_state and st.session_state.get("api_key")
+            elif current_step == 4:  # RAG Chain
+                can_proceed = False  # No step after RAG Chain
+
             if st.button("Next ➡️"):
-                if can_proceed(current_step):
+                if can_proceed:
                     st.session_state.current_step += 1
                     st.rerun()
                 else:
