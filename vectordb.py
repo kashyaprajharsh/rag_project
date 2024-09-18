@@ -25,6 +25,7 @@ from umap import UMAP
 from sklearn.manifold import TSNE
 from sklearn.metrics.pairwise import cosine_similarity
 import streamlit as st
+from uuid import uuid4
 
 os.environ["COHERE_API_KEY"] = st.secrets['COHERE_API_KEY']
 
@@ -50,13 +51,19 @@ def create_vectorstore(splits, batch_size=5000, use_hyde=False, api_key=None):
         embeddings = OpenAIEmbeddings(openai_api_key=api_key)
         vectorstore = Chroma(embedding_function=embeddings)
     
-    # Add unique IDs to all documents before batching
-    for idx, doc in enumerate(splits):
-        doc.metadata["unique_id"] = f"doc_{idx}"
+    # Generate UUIDs for all documents
+    uuids = [str(uuid4()) for _ in range(len(splits))]
     
+    # Add unique_id to each document's metadata
+    for split, uuid in zip(splits, uuids):
+        if not hasattr(split, 'metadata'):
+            split.metadata = {}
+        split.metadata['unique_id'] = uuid
+
     for i in range(0, len(splits), batch_size):
         batch = splits[i:i + batch_size]
-        vectorstore.add_documents(documents=batch)
+        batch_uuids = uuids[i:i + batch_size]
+        vectorstore.add_documents(documents=batch, ids=batch_uuids)
     
     return vectorstore
 

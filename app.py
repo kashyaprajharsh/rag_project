@@ -30,6 +30,7 @@ import validators
 from typing import Any, List, Dict
 from itertools import combinations
 import difflib
+from uuid import uuid4
 
 
 # Setup Logging
@@ -87,9 +88,17 @@ def cached_load_pdf_data(pdf_paths: List[str], method: str) -> Any:
 def cached_create_vectorstore(
     _splits: List[Any], batch_size: int, use_hyde: bool, api_key: str
 ) -> Any:
-    return create_vectorstore(
+    # Generate UUIDs for all documents
+    uuids = [str(uuid4()) for _ in range(len(_splits))]
+    
+    vectorstore = create_vectorstore(
         _splits, batch_size=batch_size, use_hyde=use_hyde, api_key=api_key
     )
+    
+    # Store the UUIDs in the session state for potential future use
+    st.session_state.document_uuids = uuids
+    
+    return vectorstore
 
 # Centralized Error Handling
 def handle_error(e: Exception, user_message: str = "An error occurred") -> None:
