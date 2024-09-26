@@ -434,6 +434,7 @@ def text_splitting_page() -> None:
 
     semantic_params = {}
     if "Semantic" in selected_splitters:
+        st.warning("⚠️ The Semantic Splitter may take a considerable amount of time for large PDFs. Please be patient.")
         if not st.session_state.api_key:
             st.error("❗ OpenAI API Key is required for the Semantic Splitter. Please provide it in the sidebar.")
             return
@@ -566,7 +567,7 @@ def text_splitting_page() -> None:
 
 
 # Page: Retriever
-# Page: Retriever
+
 def retriever_page() -> None:
     st.header("🔍 Vector Store and Retriever")
 
@@ -632,7 +633,12 @@ def retriever_page() -> None:
         st.subheader("Retriever Settings")
         retriever_type = st.selectbox(
             "Retriever type",
-            ["Vector Store", "Reranker", "Hybrid", "Hybrid Reranker"],
+            [
+                "Vector Store Retriever",
+                "Vector Store Retriever with Reranker",
+                "Ensemble Retriever (BM25 + Vector Store)",
+                "Ensemble Retriever with Reranker"
+            ],
             key="retriever_type",
         )
 
@@ -653,15 +659,17 @@ def retriever_page() -> None:
         else:
             fetch_k = k
 
-        if retriever_type in ["Reranker", "Hybrid Reranker"]:
+        if "Reranker" in retriever_type:
             reranker_type = st.selectbox(
-                "Reranker type", ["huggingface", "cohere"], key="reranker_type"
+                "Reranker type", 
+                ["cohere", "huggingface (BAAI/bge-reranker-base)"], 
+                key="reranker_type"
             )
             top_n = st.slider(
                 "Number of documents to rerank (top_n)", 1, 10, 3, key="reranker_top_n"
             )
 
-        if retriever_type in ["Hybrid", "Hybrid Reranker"]:
+        if "Ensemble" in retriever_type:
             bm25_weight = st.slider(
                 "BM25 Weight",
                 0.0,
@@ -669,7 +677,7 @@ def retriever_page() -> None:
                 0.5,
                 0.1,
                 key="bm25_weight",
-                help="Weight for BM25 retrieval in the hybrid retriever.",
+                help="Weight for BM25 retrieval in the ensemble retriever.",
             )
             vector_weight = 1 - bm25_weight
             st.info(f"Vector Store Weight: {vector_weight:.1f}")
@@ -685,13 +693,13 @@ def retriever_page() -> None:
                     )
                     st.session_state.base_retriever = base_retriever
 
-                    if retriever_type in ["Reranker", "Hybrid Reranker"]:
+                    if "Reranker" in retriever_type:
                         reranker_retriever = get_reranker_retriever(
                             base_retriever, reranker_type, top_n
                         )
                         st.session_state.reranker_retriever = reranker_retriever
 
-                    if retriever_type in ["Hybrid", "Hybrid Reranker"]:
+                    if "Ensemble" in retriever_type:
                         hybrid_retriever = get_hybrid_retriever(
                             st.session_state.split_results[
                                 st.session_state.recommended_splitter
@@ -702,7 +710,7 @@ def retriever_page() -> None:
                         )
                         st.session_state.hybrid_retriever = hybrid_retriever
 
-                    if retriever_type == "Hybrid Reranker":
+                    if retriever_type == "Ensemble Retriever with Reranker":
                         hybrid_reranker_retriever = get_hybrid_reranker_retriever(
                             st.session_state.split_results[
                                 st.session_state.recommended_splitter
@@ -719,7 +727,7 @@ def retriever_page() -> None:
 
                     st.session_state.current_retriever_type = retriever_type
                     st.success(
-                        f"{'HYDE ' if st.session_state.use_hyde else ''}Vector Store and {retriever_type} Retriever created successfully!"
+                        f"{'HYDE ' if st.session_state.use_hyde else ''}Vector Store and {retriever_type} created successfully!"
                     )
                     st.session_state.retriever_created = True  # Track retriever creation
                 except Exception as e:
@@ -747,16 +755,16 @@ def retriever_page() -> None:
                     )
 
                     comparison_docs = []
-                    if st.session_state.current_retriever_type != "Vector Store":
-                        if st.session_state.current_retriever_type == "Reranker":
+                    if st.session_state.current_retriever_type != "Vector Store Retriever":
+                        if st.session_state.current_retriever_type == "Vector Store Retriever with Reranker":
                             comparison_docs = retrieve_documents(
                                 st.session_state.reranker_retriever, query
                             )
-                        elif st.session_state.current_retriever_type == "Hybrid":
+                        elif st.session_state.current_retriever_type == "Ensemble Retriever (BM25 + Vector Store)":
                             comparison_docs = retrieve_documents(
                                 st.session_state.hybrid_retriever, query
                             )
-                        elif st.session_state.current_retriever_type == "Hybrid Reranker":
+                        elif st.session_state.current_retriever_type == "Ensemble Retriever with Reranker":
                             comparison_docs = retrieve_documents(
                                 st.session_state.hybrid_reranker_retriever, query
                             )
@@ -770,7 +778,7 @@ def retriever_page() -> None:
                         display_retrieved_docs(base_docs, "Base Retriever")
 
                     with col2:
-                        if st.session_state.current_retriever_type != "Vector Store":
+                        if st.session_state.current_retriever_type != "Vector Store Retriever":
                             st.markdown(
                                 f"### {st.session_state.current_retriever_type}"
                             )
@@ -780,7 +788,7 @@ def retriever_page() -> None:
                         else:
                             st.markdown("### Comparison")
                             st.info(
-                                "No comparison retriever selected. Using Vector Store only."
+                                "No comparison retriever selected. Using Vector Store Retriever only."
                             )
 
                     st.subheader("Embedding Visualization")
@@ -800,7 +808,7 @@ def retriever_page() -> None:
                         with st.spinner("Creating embedding visualization..."):
                             try:
                                 retrieved_docs = {"Base": base_docs}
-                                if st.session_state.current_retriever_type != "Vector Store":
+                                if st.session_state.current_retriever_type != "Vector Store Retriever":
                                     retrieved_docs[
                                         st.session_state.current_retriever_type
                                     ] = comparison_docs

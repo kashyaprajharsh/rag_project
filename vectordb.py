@@ -87,14 +87,14 @@ def get_retriever(vectorstore, search_type="similarity", k=5, fetch_k=20):
         search_kwargs=search_kwargs
     )
 
-def get_reranker_retriever(base_retriever, reranker_type="huggingface", top_n=3):
-    if reranker_type == "huggingface":
+def get_reranker_retriever(base_retriever, reranker_type="cohere", top_n=3):
+    if reranker_type == "huggingface (BAAI/bge-reranker-base)":
         model = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
         compressor = CrossEncoderReranker(model=model, top_n=top_n)
     elif reranker_type == "cohere":
         compressor = CohereRerank(model="rerank-english-v3.0", top_n=top_n,cohere_api_key=st.secrets['COHERE_API_KEY'])
     else:
-        raise ValueError("Invalid reranker type. Choose 'huggingface' or 'cohere'.")
+        raise ValueError("Invalid reranker type. Choose 'cohere' or 'huggingface (BAAI/bge-reranker-base)'.")
     
     return ContextualCompressionRetriever(base_compressor=compressor, base_retriever=base_retriever)
 
@@ -107,16 +107,16 @@ def get_hybrid_retriever(splits, vector_retriever, bm25_weight=0.5, vector_weigh
         weights=[bm25_weight, vector_weight]
     )
 
-def get_hybrid_reranker_retriever(splits, vector_retriever, bm25_weight=0.5, vector_weight=0.5, reranker_type="huggingface", top_n=3):
+def get_hybrid_reranker_retriever(splits, vector_retriever, bm25_weight=0.5, vector_weight=0.5, reranker_type="cohere", top_n=3):
     hybrid_retriever = get_hybrid_retriever(splits, vector_retriever, bm25_weight, vector_weight)
     
-    if reranker_type == "huggingface":
+    if reranker_type == "huggingface (BAAI/bge-reranker-base)":
         model = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
         compressor = CrossEncoderReranker(model=model, top_n=top_n)
     elif reranker_type == "cohere":
-        compressor = CohereRerank(model="rerank-english-v3.0", top_n=top_n)
+        compressor = CohereRerank(model="rerank-english-v3.0", top_n=top_n,cohere_api_key=st.secrets['COHERE_API_KEY'])
     else:
-        raise ValueError("Invalid reranker type. Choose 'huggingface' or 'cohere'.")
+        raise ValueError("Invalid reranker type. Choose 'cohere' or 'huggingface (BAAI/bge-reranker-base)'.")
     
     return ContextualCompressionRetriever(base_compressor=compressor, base_retriever=hybrid_retriever)
 

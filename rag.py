@@ -69,10 +69,10 @@ def get_llm(model_name="gpt-4o-mini", api_key=None):
     return ChatOpenAI(model_name=model_name, temperature=0.1, openai_api_key=api_key)
 
 RAG_TYPES = {
-    "Naive RAG": "base_retriever",
-    "RAG with Reranker": "reranker_retriever",
-    "RAG with Hybrid Search": "hybrid_retriever",
-    "Advanced RAG": "hybrid_reranker_retriever"
+    "Vector Store Retriever": "base_retriever",
+    "Vector Store Retriever with Reranker": "reranker_retriever",
+    "Ensemble Retriever (BM25 + Vector Store)": "hybrid_retriever",
+    "Ensemble Retriever with Reranker": "hybrid_reranker_retriever"
 }
 
 def generate_rag_answer(prompt, retriever, rag_type, api_key):
