@@ -1,11 +1,13 @@
 # Streamlit
-.streamlit/
-
+.streamlit
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 
+
+\__pycache__
+\.devcontainer
 # Virtual Environment
 venv/
 env/
