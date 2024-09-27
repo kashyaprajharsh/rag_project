@@ -13,6 +13,9 @@ venv/
 env/
 ENV/
 
+__pycache__/
+*.pyc
+
 # IDEs and Editors
 .vscode/
 .idea/
