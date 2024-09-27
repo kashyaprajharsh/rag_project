@@ -571,13 +571,17 @@ def text_splitting_page() -> None:
 def retriever_page() -> None:
     st.header("🔍 Vector Store and Retriever")
 
-    if "split_results" not in st.session_state:
+    if "pdf_data" not in st.session_state or not st.session_state.pdf_data:
+        st.warning("Please load a PDF first in the PDF Loading step.")
+        st.stop()
+
+    if "split_results" not in st.session_state or not st.session_state.split_results:
         st.warning("Please process the PDF in the Text Splitting step first.")
-        return
+        st.stop()
 
     if "recommended_splitter" not in st.session_state:
         st.warning("No recommended splitter found. Please complete the Text Splitting step.")
-        return
+        st.stop()
 
     st.subheader("Text Splitting")
     selected_splitter = st.selectbox(
@@ -726,6 +730,7 @@ def retriever_page() -> None:
                         )
 
                     st.session_state.current_retriever_type = retriever_type
+                    st.session_state.retriever_created = True  # Track retriever creation
                     st.success(
                         f"{'HYDE ' if st.session_state.use_hyde else ''}Vector Store and {retriever_type} created successfully!"
                     )
@@ -835,13 +840,17 @@ def retriever_page() -> None:
 def rag_chain_page() -> None:
     st.header("🔗 RAG Chain")
 
-    if "vectorstore" not in st.session_state:
-        st.warning("Please create a Vector Store in the Retriever step first.")
-        return
+    if "pdf_data" not in st.session_state or not st.session_state.pdf_data:
+        st.warning("Please load a PDF first in the PDF Loading step.")
+        st.stop()
 
-    if not st.session_state.api_key:
+    if "vectorstore" not in st.session_state or not st.session_state.vectorstore:
+        st.warning("Please create a Vector Store in the Retriever step first.")
+        st.stop()
+
+    if not st.session_state.get("api_key"):
         st.warning("Please provide your OpenAI API Key in the sidebar to use the RAG Chain.")
-        return
+        st.stop()
 
     # Display chat messages and results from history
     for i in range(0, len(st.session_state.messages), 2):
@@ -895,7 +904,6 @@ def rag_chain_page() -> None:
                     st.error(
                         "No results were generated. Please check if any retrievers are available and properly configured."
                     )
-
             except Exception as e:
                 handle_error(e, "Error generating answers")
 
@@ -918,6 +926,14 @@ def main() -> None:
             st.warning("Please enter your OpenAI API Key to use the application.")
 
         st.markdown("---")
+        # Determine which steps are available
+        steps_available = {
+            "Home": True,
+            "PDF Loading": True,
+            "Text Splitting": "pdf_data" in st.session_state and st.session_state.pdf_data,
+            "Retriever": "split_results" in st.session_state and st.session_state.split_results,
+            "RAG Chain": "vectorstore" in st.session_state and st.session_state.vectorstore and st.session_state.get("api_key")
+        }
 
         # Sidebar Navigation using option_menu
         steps = ["Home", "PDF Loading", "Text Splitting", "Retriever", "RAG Chain"]
@@ -929,9 +945,11 @@ def main() -> None:
             default_index=st.session_state.current_step,
         )
 
-        # Update current_step based on sidebar selection
-        if st.session_state.current_step != steps.index(selected):
+        # Update current_step based on sidebar selection, only if the step is available
+        if steps_available[selected]:
             st.session_state.current_step = steps.index(selected)
+        else:
+            st.error(f"Please complete previous steps before accessing {selected}.")
 
         # Progress Indicator based on selected page
         current_step = st.session_state.current_step
@@ -956,40 +974,44 @@ def main() -> None:
     }
 
     # Display the selected page
-    pages[steps[current_step]]()
+    pages[steps[st.session_state.current_step]]()
 
     # Navigation Buttons
     st.markdown("---")
     col_prev, col_center, col_next = st.columns([1, 2, 1])
 
     with col_prev:
-        if current_step > 0:
+        if st.session_state.current_step > 0:
             if st.button("⬅️ Previous"):
                 st.session_state.current_step -= 1
                 st.rerun()
 
     with col_next:
-        if current_step < len(steps) - 1:
-            # Determine if the user can proceed to the next step
-            can_proceed = False
-            if current_step == 0:  # Home
-                can_proceed = True
-            elif current_step == 1:  # PDF Loading
-                can_proceed = st.session_state.get("pdf_loaded", False)
-            elif current_step == 2:  # Text Splitting
-                can_proceed = "split_results" in st.session_state
-            elif current_step == 3:  # Retriever
-                can_proceed = "vectorstore" in st.session_state and st.session_state.get("api_key")
-            elif current_step == 4:  # RAG Chain
-                can_proceed = False  # No step after RAG Chain
+        if st.session_state.current_step < len(steps) - 1:
+            next_step = steps[st.session_state.current_step + 1]
+            # Determine if the current step is completed
+            step_completed = False
+            current_step_name = steps[st.session_state.current_step]
+
+            if current_step_name == "Home":
+                step_completed = True  # Home is always completed
+            elif current_step_name == "PDF Loading":
+                step_completed = st.session_state.get("pdf_loaded", False)
+            elif current_step_name == "Text Splitting":
+                step_completed = bool(st.session_state.get("split_results"))
+            elif current_step_name == "Retriever":
+                step_completed = st.session_state.get("retriever_created", False)
+            elif current_step_name == "RAG Chain":
+                step_completed = st.session_state.get("vectorstore", False) and st.session_state.get("api_key", False)
 
             if st.button("Next ➡️"):
-                if can_proceed:
+                if step_completed:
                     st.session_state.current_step += 1
                     st.rerun()
                 else:
-                    st.error("Please complete the current step before proceeding.")
+                    st.error(f"Please complete the **{current_step_name}** step before proceeding to **{next_step}**.")
 
 if __name__ == "__main__":
     initialize_session_state()
     main()
+
