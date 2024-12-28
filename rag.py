@@ -2,10 +2,12 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains import LLMChain
 from langchain.schema import StrOutputParser
 import time
 from langchain_community.callbacks.manager import get_openai_callback
+import streamlit as st
 
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
@@ -25,6 +27,8 @@ Follow these steps:
 4. In case the CONTEXT LACKS the necessary information to answer, CONFIDENTLY STATE "I don't have enough information to answer that question."
 
 5. ENSURE your response is CONCISE and PRECISE, avoiding any external knowledge or assumptions not present in the given context.
+
+6. Please only provide the answer to the question and nothing else and answer should be from context provided.
 
 Remember, I’m going to tip $300K for a BETTER SOLUTION!
 
@@ -63,10 +67,13 @@ def create_rag_chain(retriever, llm):
         {"context": retriever, "question": RunnablePassthrough()}
     ).assign(answer=rag_chain_from_docs)
 
-def get_llm(model_name="gpt-4o-mini", api_key=None):
-    if not api_key:
-        raise ValueError("OpenAI API Key is required. Please provide it in the sidebar.")
-    return ChatOpenAI(model_name=model_name, temperature=0.1, openai_api_key=api_key)
+def get_llm(model_name="gpt-4o-mini", api_key=None, provider="OpenAI"):
+    if provider == "OpenAI":
+        if not api_key:
+            raise ValueError("OpenAI API Key is required. Please provide it in the sidebar.")
+        return ChatOpenAI(model_name=model_name, temperature=0.1, openai_api_key=api_key)
+    else:  # Google Gemini
+        return ChatGoogleGenerativeAI(model="gemini-2.0-flash-exp", temperature=0.1)
 
 RAG_TYPES = {
     "Vector Store Retriever": "base_retriever",
@@ -76,15 +83,29 @@ RAG_TYPES = {
 }
 
 def generate_rag_answer(prompt, retriever, rag_type, api_key):
-    llm = get_llm(api_key=api_key)
+    provider = st.session_state.get("llm_provider", "OpenAI")
+    llm = get_llm(api_key=api_key, provider=provider)
     chain = create_rag_chain(retriever, llm)
     question = prompt['question'] if isinstance(prompt, dict) else prompt
     
     start_time = time.time()
-    with get_openai_callback() as cb:
+    
+    # Only use OpenAI callback for OpenAI provider
+    if provider == "OpenAI":
+        with get_openai_callback() as cb:
+            result = chain.invoke(question)
+            end_time = time.time()
+            total_tokens = cb.total_tokens
+            prompt_tokens = cb.prompt_tokens
+            completion_tokens = cb.completion_tokens
+            total_cost = cb.total_cost
+    else:
         result = chain.invoke(question)
         end_time = time.time()
-        #print(cb)
+        total_tokens = 0  # Gemini doesn't provide token counts
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_cost = 0
     
     total_duration = end_time - start_time
     
@@ -95,18 +116,18 @@ def generate_rag_answer(prompt, retriever, rag_type, api_key):
         "input": question,
         "output": result["answer"],
         "context": result["context"],
-        "prompt": prompt_template,  # Add the prompt to the returned results
+        "prompt": prompt_template,
         "steps": [
-            {"name": "Retriever", "duration": total_duration / 2},  # Estimate
-            {"name": "LLM", "duration": total_duration / 2}  # Estimate
+            {"name": "Retriever", "duration": total_duration / 2},
+            {"name": "LLM", "duration": total_duration / 2}
         ],
-        "startTime": start_time * 1000,  # Convert to milliseconds
+        "startTime": start_time * 1000,
         "endTime": end_time * 1000,
         "status": "Success",
-        "totalTokens": cb.total_tokens,
-        "promptTokens": cb.prompt_tokens,
-        "completionTokens": cb.completion_tokens,
-        "cost": cb.total_cost,
+        "totalTokens": total_tokens,
+        "promptTokens": prompt_tokens,
+        "completionTokens": completion_tokens,
+        "cost": total_cost,
         "latency": total_duration
     }
 

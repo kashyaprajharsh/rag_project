@@ -1,9 +1,11 @@
 [theme]
-primaryColor = "#1E88E5"
-backgroundColor = "#F0F2F6"
-secondaryBackgroundColor = "#D3D3D3"
-textColor = "#333333"
+primaryColor="#10789c"
+backgroundColor="#00000e"
+secondaryBackgroundColor="#08081E"
+textColor="#ffffff"      # Pure white for clarity
 font = "sans serif"
+
+
     
 [server]
 enableCORS = false

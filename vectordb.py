@@ -2,7 +2,8 @@ __import__('pysqlite3')
 import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
-import chromadb
+
+#import chromadb
 
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
@@ -19,15 +20,29 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
-from typing import List, Dict, Callable
+from typing import List, Dict, Callable, Optional
 from langchain.schema import Document
 from umap import UMAP
 from sklearn.manifold import TSNE
 from sklearn.metrics.pairwise import cosine_similarity
 import streamlit as st
 from uuid import uuid4
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
+from rag import get_llm
+
 
 os.environ["COHERE_API_KEY"] = st.secrets['COHERE_API_KEY']
+
+def get_embeddings(api_key=None, provider="OpenAI"):
+    if provider == "OpenAI":
+        if not api_key:
+            raise ValueError("OpenAI API Key is required. Please provide it in the sidebar.")
+        return OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=api_key)
+    else:  # Google Gemini
+        return GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 
 def create_vectorstore(splits, batch_size=5000, use_hyde=False, api_key=None):
     """
@@ -39,16 +54,39 @@ def create_vectorstore(splits, batch_size=5000, use_hyde=False, api_key=None):
     :param api_key: OpenAI API key
     :return: Chroma vector store
     """
-    if not api_key:
-        raise ValueError("OpenAI API Key is required. Please provide it in the sidebar.")
+    provider = st.session_state.get("llm_provider", "OpenAI")
     
     if use_hyde:
-        llm = ChatOpenAI(temperature=0.1, model="gpt-4o-mini", openai_api_key=api_key)
-        embeddings = OpenAIEmbeddings(openai_api_key=api_key)
-        hyde_embeddings = HypotheticalDocumentEmbedder.from_llm(llm, embeddings, prompt_key="dbpedia_entity")
+        llm = get_llm(api_key=api_key, provider=provider)
+        embeddings = get_embeddings(api_key=api_key, provider=provider)
+        
+        # Custom HYDE prompt for RAG
+        hyde_prompt = PromptTemplate(
+            input_variables=["question"],
+            template="""Generate a concise, focused document that directly answers the given question. 
+            The document should:
+            - Be specific and factual
+            - Include key terms and relevant context
+            - Be 3-5 sentences long
+            - Focus only on information needed to answer the question
+
+            Question: {question}
+            Hypothetical Document:"""
+        )
+        
+        # Create chain that extracts content from AIMessage
+        hyde_chain = (hyde_prompt | llm | (lambda x: x.content))
+        
+        hyde_embeddings = HypotheticalDocumentEmbedder(
+            llm_chain=hyde_chain, 
+            base_embeddings=embeddings
+        )
         vectorstore = Chroma(embedding_function=hyde_embeddings)
+        
+        # Store the hyde_chain in session state for later inspection
+        st.session_state.hyde_chain = hyde_chain
     else:
-        embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+        embeddings = get_embeddings(api_key=api_key, provider=provider)
         vectorstore = Chroma(embedding_function=embeddings)
     
     # Generate UUIDs for all documents
@@ -144,10 +182,13 @@ def create_embedding_visualization(vectorstore, docs_processed: List[Document], 
     :param dimensions: Number of dimensions for the projection (2 or 3)
     :param use_random_state: Whether to use a fixed random state for reproducibility
     :param selected_retrievers: List of retrievers to visualize
-    :param api_key: OpenAI API key
+    :param api_key: API key (required for OpenAI)
     :return: Plotly figure object
     """
-    if not api_key:
+    provider = st.session_state.get("llm_provider", "OpenAI")
+    
+    # Only require API key for OpenAI
+    if provider == "OpenAI" and not api_key:
         raise ValueError("OpenAI API Key is required. Please provide it in the sidebar.")
     
     # Retrieve embeddings and metadata
@@ -163,8 +204,9 @@ def create_embedding_visualization(vectorstore, docs_processed: List[Document], 
         metadatas = [metadatas[i] for i in indices]
         documents = [documents[i] for i in indices]
 
-    # Add query embedding
-    query_vector = OpenAIEmbeddings(openai_api_key=api_key).embed_query(query)
+    # Add query embedding using the appropriate provider
+    embedding_model = get_embeddings(api_key=api_key, provider=provider)
+    query_vector = embedding_model.embed_query(query)
     all_embeddings = embeddings + [query_vector]
 
     # Calculate cosine similarities
@@ -281,3 +323,34 @@ def create_embedding_visualization(vectorstore, docs_processed: List[Document], 
         )
 
     return fig
+
+# Add new function to display HYDE generations
+def display_hyde_generations(query: str, return_doc: bool = False) -> Optional[str]:
+    """
+    Generate and display HYDE document for a query.
+    
+    Args:
+        query (str): The query to generate a hypothetical document for
+        return_doc (bool): Whether to return the generated document
+        
+    Returns:
+        Optional[str]: The generated document if return_doc is True, None otherwise
+    """
+    try:
+        # Generate hypothetical document and extract content from AIMessage
+        hyde_response = st.session_state.hyde_chain.invoke({"question": query})
+        hyde_doc = hyde_response.content if hasattr(hyde_response, 'content') else str(hyde_response)
+        
+        with st.expander("View HYDE Generated Document"):
+            st.markdown("### Hypothetical Document")
+            st.write(hyde_doc)
+            
+            # Add some analysis
+            st.markdown("### Document Analysis")
+            st.markdown(f"- Document length: {len(hyde_doc)} characters")
+            st.markdown(f"- Word count: {len(hyde_doc.split())}")
+            
+            # You could add more analysis here (e.g., key terms, sentiment, etc.)
+            
+    except Exception as e:
+        st.error(f"Error generating HYDE document: {str(e)}")
