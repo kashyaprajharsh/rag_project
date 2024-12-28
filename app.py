@@ -17,6 +17,7 @@ from vectordb import (
     get_hybrid_reranker_retriever,
     retrieve_documents,
     create_embedding_visualization,
+    display_hyde_generations,
 )
 from rag import generate_all_rag_answers, RAG_TYPES
 from streamlit_option_menu import option_menu
@@ -29,6 +30,10 @@ import validators
 from typing import Any, List, Dict
 from itertools import combinations
 import difflib
+import base64
+import requests
+import tempfile
+import os
 
 
 # Configure Streamlit Page
@@ -69,13 +74,29 @@ def initialize_session_state() -> None:
         "vectorstore": None,
         "messages": [],
         "rag_results": [],
-        "api_key": "",  # Initialized as empty string
+        "api_key": "",
         "recommended_splitter": None,
         "use_hyde": False,
-        "retriever_created": False,  # New state variable
+        "retriever_created": False,
         "retrieval_done": False,
         "query": "",
         "current_retriever_type": "",
+        # PDF Loading state
+        "pdf_paths": [],
+        "current_pdf_path": None,
+        "pdf_source": "Upload PDFs",
+        "uploaded_files": None,
+        "selected_pdf_index": 0,
+        # Text Splitting state
+        "splitting_results": None,
+        "previous_splitter_selection": ["Character"],  # Default selection
+        "chunk_size": 1000,  # Default chunk size
+        "chunk_overlap": 200,  # Default overlap
+        "semantic_params": {
+            "threshold_type": "percentile",
+            "threshold_amount": 0.95,
+            "number_of_chunks": 500
+        }
     }
     for key, value in default_state.items():
         if key not in st.session_state:
@@ -83,8 +104,8 @@ def initialize_session_state() -> None:
 
 logger.info("Starting application...")
 
-
-
+# Add at the top of the file with other global variables
+steps = ["Home", "PDF Loading", "Text Splitting", "Retriever", "RAG Chain"]
 
 # Centralized Error Handling
 def handle_error(e: Exception, user_message: str = "An error occurred") -> None:
@@ -217,6 +238,9 @@ def visualize_rag_chain(chain_data: Dict[str, Any]) -> None:
 
 # Display Splitting Results
 def display_splitting_results(results: Dict[str, Any]) -> None:
+    # Store results in session state
+    st.session_state.splitting_results = results
+    
     st.subheader("Splitter Metrics Comparison")
     metrics_df = pd.DataFrame({
         'Splitter': list(results.keys()),
@@ -237,8 +261,6 @@ def display_splitting_results(results: Dict[str, Any]) -> None:
 
     st.dataframe(metrics_df)
 
-    
-
     # Add a detailed explanation of each metric
     st.subheader("Metric Explanations")
     st.markdown("""
@@ -252,7 +274,6 @@ def display_splitting_results(results: Dict[str, Any]) -> None:
     - **Semantic Coherence**: (For semantic splitter only) A measure of how semantically related adjacent chunks are. Higher values indicate better semantic coherence.
     """)
 
-
     st.subheader("Chunk Size Distribution")
     hist_data = []
     group_labels = []
@@ -261,13 +282,16 @@ def display_splitting_results(results: Dict[str, Any]) -> None:
         hist_data.append(chunk_sizes)
         group_labels.append(splitter)
 
+    # Create a unique key based on the splitters being compared
+    chart_key = f"chunk_size_dist_{'_'.join(sorted(results.keys()))}"
+    
     fig = ff.create_distplot(hist_data, group_labels, bin_size=100)
     fig.update_layout(
         title_text='Distribution of Chunk Sizes',
         xaxis_title_text='Chunk Size (characters)',
         yaxis_title_text='Density'
     )
-    st.plotly_chart(fig)
+    st.plotly_chart(fig, key=chart_key)  # Use the unique key here
 
     st.subheader("Splitter Recommendation")
     recommendations = {
@@ -291,13 +315,17 @@ def display_splitting_results(results: Dict[str, Any]) -> None:
 
 # Define Pages
 def home_page() -> None:
-    st.header("Welcome to RAGExplorer")
-    st.write(
-        "This application helps you understand Retrieval-Augmented Generation (RAG) and its internal workings."
-    )
+    # Create two columns for the entire content including header
+    left_col, right_col = st.columns([3, 2])
 
-    col1, col2 = st.columns(2)
-    with col1:
+    with left_col:
+        st.write("")
+        st.header("Welcome to RAGExplorer")
+        st.write(
+            "This application helps you understand Retrieval-Augmented Generation (RAG) and its internal workings."
+        )
+
+        # What is RAG section
         st.subheader("What is RAG?")
         st.write(
             """
@@ -306,7 +334,8 @@ def home_page() -> None:
             leading to more accurate and up-to-date responses.
             """
         )
-    with col2:
+
+        # How to use section
         st.subheader("How to use this app")
         st.write(
             """
@@ -318,68 +347,248 @@ def home_page() -> None:
             """
         )
 
+    with right_col:
+        # Reduce vertical spacing before the image
+        st.write("")  # Reduced from two write() statements to one
+        # Add AI image with curved edges using HTML/CSS
+        ai_image = Image.open("AI_image.png")
+        # Convert the image to bytes
+        img_bytes = io.BytesIO()
+        ai_image.save(img_bytes, format='PNG')
+        img_str = base64.b64encode(img_bytes.getvalue()).decode()
+        
+        # HTML with CSS for curved edges and adjusted margin
+        st.markdown(
+            f"""
+            <style>
+            .curved-image {{
+                border-radius: 25px;
+                overflow: hidden;
+                margin-top: -100px;  /* Added negative margin to move image up */
+            }}
+            .curved-image img {{
+                width: 100%;
+                height: auto;
+                display: inline;
+            }}
+            </style>
+            <div class="curved-image">
+                <img src="data:image/png;base64,{img_str}">
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+# Add this function to handle PDF display for different sources
+def get_pdf_display_path(pdf_source):
+    """
+    Returns a local file path for the PDF, downloading if necessary.
+    """
+    if isinstance(pdf_source, (str, bytes)):
+        if isinstance(pdf_source, str) and pdf_source.startswith('http'):
+            # Download from URL
+            try:
+                response = requests.get(pdf_source)
+                response.raise_for_status()
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+                    tmp_file.write(response.content)
+                    return tmp_file.name
+            except Exception as e:
+                st.error(f"Failed to download PDF: {str(e)}")
+                return None
+        else:
+            # Local file path
+            return pdf_source
+    else:
+        # Uploaded file
+        try:
+            # Read the content of the uploaded file
+            pdf_content = pdf_source.read()
+            # Create a temporary file with the content
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+                tmp_file.write(pdf_content)
+                return tmp_file.name
+        except Exception as e:
+            st.error(f"Failed to save uploaded PDF: {str(e)}")
+            return None
+
+def displayPDF(file_path):
+    """
+    Display PDF in the Streamlit app
+    """
+    try:
+        with open(file_path, "rb") as f:
+            base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+        
+        # Embedding PDF in HTML
+        pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600" type="application/pdf"></iframe>'
+        
+        # Displaying File
+        st.markdown(pdf_display, unsafe_allow_html=True)
+    except Exception as e:
+        st.error(f"Error displaying PDF: {str(e)}")
+
 def pdf_loading_page() -> None:
     st.header("📄 PDF Loading")
 
-    pdf_source = st.radio(
-        "Choose PDF source:",
-        ["Upload PDFs", "Use provided PDF", "Use built-in link", "Use custom URLs"],
-        horizontal=True,
-    )
+    main_col, viewer_col = st.columns([3, 2])
 
-    pdf_paths = []
-
-    if pdf_source == "Upload PDFs":
-        uploaded_files = st.file_uploader(
-            "Upload PDF files", type="pdf", accept_multiple_files=True
-        )
-        if uploaded_files:
-            pdf_paths = process_uploaded_files(uploaded_files)
-            st.success(f"{len(uploaded_files)} file(s) uploaded")
-    elif pdf_source == "Use provided PDF":
-        pdf_paths = ["LargeLanguageModel.pdf"]
-        st.info(f"Using provided PDF: {pdf_paths[0]}")
-    elif pdf_source == "Use built-in link":
-        pdf_paths = ["https://arxiv.org/pdf/1706.03762.pdf"]
-        st.info(f"Using built-in link: {pdf_paths[0]}")
-    else:  # Use custom URLs
-        raw_urls = st.text_area("Enter PDF URLs (one per line):").split("\n")
-        pdf_paths = [url.strip() for url in raw_urls if url.strip()]
-        if pdf_paths:
-            valid_pdf_paths = validate_pdf_urls(pdf_paths)
-            if len(valid_pdf_paths) < len(pdf_paths):
-                st.warning("Some URLs may not be valid PDFs and have been excluded.")
-            pdf_paths = valid_pdf_paths
-        else:
-            st.info("Please enter valid PDF URLs ending with '.pdf'")
-
-    with st.expander("Advanced Options"):
-        loading_method = st.selectbox(
-            "Loading method:",
-            ["Normal", "With Images"],
-            help="Choose 'With Images' to extract images from PDFs",
+    with main_col:
+        # Use session state for pdf_source
+        st.session_state.pdf_source = st.radio(
+            "Choose PDF source:",
+            ["Upload PDFs", "Use provided PDF", "Use built-in link", "Use custom URLs"],
+            horizontal=True,
+            key="pdf_source_radio",
+            index=["Upload PDFs", "Use provided PDF", "Use built-in link", "Use custom URLs"].index(st.session_state.pdf_source)
         )
 
-    if st.button("📥 Load PDFs", key="load_pdfs_button"):
-        if pdf_paths:
-            with st.spinner("Loading PDFs..."):
-                try:
-                    data = load_pdf_data(
-                        pdf_paths, method=loading_method.lower().replace(" ", "_")
+        pdf_paths = []
+        current_pdf_path = None
+
+        if st.session_state.pdf_source == "Upload PDFs":
+            # Use session state for uploaded files
+            uploaded_files = st.file_uploader(
+                "Upload PDF files", 
+                type="pdf", 
+                accept_multiple_files=True,
+                key="pdf_uploader"
+            )
+            if uploaded_files:
+                # Store the uploaded files in session state
+                st.session_state.uploaded_files = uploaded_files
+                pdf_paths = process_uploaded_files(uploaded_files)
+                if pdf_paths:
+                    # Seek to beginning of file before reading
+                    uploaded_files[st.session_state.selected_pdf_index].seek(0)
+                    current_pdf_path = get_pdf_display_path(uploaded_files[st.session_state.selected_pdf_index])
+                st.success(f"{len(uploaded_files)} file(s) uploaded")
+                
+                if len(uploaded_files) > 1:
+                    selected_index = st.selectbox(
+                        "Select PDF to view",
+                        range(len(uploaded_files)),
+                        format_func=lambda x: uploaded_files[x].name,
+                        key="pdf_selector",
+                        index=st.session_state.selected_pdf_index
                     )
-                    st.session_state.pdf_data = data
-                    st.session_state.pdf_loaded = True
-                    st.success(f"✅ {len(pdf_paths)} PDF(s) loaded successfully!")
+                    st.session_state.selected_pdf_index = selected_index
+                    # Seek to beginning of file before reading
+                    uploaded_files[selected_index].seek(0)
+                    current_pdf_path = get_pdf_display_path(uploaded_files[selected_index])
+            # Restore previously uploaded files if they exist
+            elif st.session_state.get("uploaded_files"):
+                uploaded_files = st.session_state.uploaded_files
+                pdf_paths = process_uploaded_files(uploaded_files)
+                if pdf_paths:
+                    # Seek to beginning of file before reading
+                    uploaded_files[st.session_state.selected_pdf_index].seek(0)
+                    current_pdf_path = get_pdf_display_path(uploaded_files[st.session_state.selected_pdf_index])
+                st.success(f"{len(uploaded_files)} file(s) previously uploaded")
+                
+                if len(uploaded_files) > 1:
+                    selected_index = st.selectbox(
+                        "Select PDF to view",
+                        range(len(uploaded_files)),
+                        format_func=lambda x: uploaded_files[x].name,
+                        key="pdf_selector",
+                        index=st.session_state.selected_pdf_index
+                    )
+                    st.session_state.selected_pdf_index = selected_index
+                    # Seek to beginning of file before reading
+                    uploaded_files[selected_index].seek(0)
+                    current_pdf_path = get_pdf_display_path(uploaded_files[selected_index])
 
-                    # Display PDF content
-                    display_pdf_content(data)
-                except Exception as e:
-                    handle_error(e, "Error loading PDFs")
+        elif st.session_state.pdf_source == "Use provided PDF":
+            pdf_paths = ["LargeLanguageModel.pdf"]
+            current_pdf_path = pdf_paths[0]
+            st.info(f"Using provided PDF: {pdf_paths[0]}")
+
+        elif st.session_state.pdf_source == "Use built-in link":
+            pdf_paths = ["https://arxiv.org/pdf/2410.07176.pdf"]
+            current_pdf_path = get_pdf_display_path(pdf_paths[0])
+            st.info(f"Using built-in link: {pdf_paths[0]}")
+
+        else:  # Use custom URLs
+            # Use session state for URLs
+            raw_urls = st.text_area(
+                "Enter PDF URLs (one per line):",
+                value="\n".join(st.session_state.get("custom_urls", [])),
+                key="url_input"
+            ).split("\n")
+            
+            pdf_paths = [url.strip() for url in raw_urls if url.strip()]
+            if pdf_paths:
+                st.session_state.custom_urls = pdf_paths
+                valid_pdf_paths = validate_pdf_urls(pdf_paths)
+                if len(valid_pdf_paths) < len(pdf_paths):
+                    st.warning("Some URLs may not be valid PDFs and have been excluded.")
+                pdf_paths = valid_pdf_paths
+                if pdf_paths:
+                    current_pdf_path = get_pdf_display_path(pdf_paths[st.session_state.selected_pdf_index])
+                    
+                    if len(pdf_paths) > 1:
+                        selected_index = st.selectbox(
+                            "Select PDF to view",
+                            range(len(pdf_paths)),
+                            format_func=lambda x: pdf_paths[x],
+                            key="url_selector",
+                            index=st.session_state.selected_pdf_index
+                        )
+                        st.session_state.selected_pdf_index = selected_index
+                        current_pdf_path = get_pdf_display_path(pdf_paths[selected_index])
+            else:
+                st.info("Please enter valid PDF URLs ending with '.pdf'")
+
+        # Store paths and current path in session state
+        st.session_state.pdf_paths = pdf_paths
+        st.session_state.current_pdf_path = current_pdf_path
+
+        with st.expander("Advanced Options"):
+            loading_method = st.selectbox(
+                "Loading method:",
+                ["Normal", "With Images"],
+                help="Choose 'With Images' to extract images from PDFs",
+            )
+
+        if st.button("📥 Load PDFs", key="load_pdfs_button"):
+            if pdf_paths:
+                with st.spinner("Loading PDFs..."):
+                    try:
+                        data = load_pdf_data(
+                            pdf_paths, method=loading_method.lower().replace(" ", "_")
+                        )
+                        st.session_state.pdf_data = data
+                        st.session_state.pdf_loaded = True
+                        st.success(f"✅ {len(pdf_paths)} PDF(s) loaded successfully!")
+
+                        # Display PDF content
+                        display_pdf_content(data)
+                    except Exception as e:
+                        handle_error(e, "Error loading PDFs")
+            else:
+                st.error("❗ Please provide valid PDF source(s).")
+
+    # Display PDF viewer in the side column
+    with viewer_col:
+        st.markdown("### PDF Preview")
+        if st.session_state.current_pdf_path:
+            displayPDF(st.session_state.current_pdf_path)
         else:
-            st.error("❗ Please provide valid PDF source(s).")
+            st.info("Select a PDF to preview")
+
+    # Clean up temporary files when the session ends
+    def cleanup_temp_files():
+        if current_pdf_path and current_pdf_path.startswith(tempfile.gettempdir()):
+            try:
+                os.remove(current_pdf_path)
+            except:
+                pass
+    
+    st.session_state['_cleanup_temp_files'] = cleanup_temp_files
 
 def text_splitting_page() -> None:
-    st.header("✂️ Text Splitting")
+    st.header("✂️ Text Splitting - Chunking")
 
     if not st.session_state.get("pdf_loaded", False):
         st.warning("Please load a PDF first in the PDF Loading step.")
@@ -387,7 +596,7 @@ def text_splitting_page() -> None:
 
     st.info(
         """
-        Text splitting is crucial for processing large documents. It breaks the text into smaller, manageable chunks.
+        Text splitting (chunking) is crucial for processing large documents. It breaks the text into smaller, manageable chunks.
         Different splitters work better for different types of documents. Experiment to find the best one for your needs.
         """
     )
@@ -399,12 +608,22 @@ def text_splitting_page() -> None:
         "Semantic": "Uses embeddings to split text based on semantic meaning. Requires OpenAI API key.",
     }
 
+    # Use session state for splitter selection with previous value
     selected_splitters = st.multiselect(
         "Choose splitter type(s):",
         list(splitter_types.keys()),
-        default=["Character"],
+        default=st.session_state.previous_splitter_selection,
         help="Select one or more splitters to compare different splitting techniques.",
+        key="splitter_selection"
     )
+
+    # Check if selection has changed
+    selection_changed = selected_splitters != st.session_state.previous_splitter_selection
+    st.session_state.previous_splitter_selection = selected_splitters.copy()
+
+    # Clear previous results if selection changed
+    if selection_changed:
+        st.session_state.splitting_results = None
 
     for splitter, description in splitter_types.items():
         if splitter in selected_splitters:
@@ -412,23 +631,30 @@ def text_splitting_page() -> None:
 
     col1, col2 = st.columns(2)
     with col1:
+        # Use session state for chunk size
         chunk_size = st.slider(
             "Chunk size",
             100,
             2000,
-            1000,
+            st.session_state.chunk_size,
             help="Number of characters/tokens per chunk. Larger sizes retain more context but may be less manageable.",
+            key="chunk_size_slider"
         )
+        st.session_state.chunk_size = chunk_size
+    
     with col2:
+        # Use session state for chunk overlap
         chunk_overlap = st.slider(
             "Chunk overlap",
             0,
             500,
-            200,
+            st.session_state.chunk_overlap,
             help="Number of overlapping characters/tokens between chunks to preserve context across splits.",
+            key="chunk_overlap_slider"
         )
+        st.session_state.chunk_overlap = chunk_overlap
 
-    semantic_params = {}
+    semantic_params = st.session_state.semantic_params.copy()
     if "Semantic" in selected_splitters:
         st.warning("⚠️ The Semantic Splitter may take a considerable amount of time for large PDFs. Please be patient.")
         if not st.session_state.api_key:
@@ -440,124 +666,80 @@ def text_splitting_page() -> None:
                 semantic_params["threshold_type"] = st.selectbox(
                     "Breakpoint Threshold Type",
                     ["percentile", "standard_deviation", "interquartile"],
+                    index=["percentile", "standard_deviation", "interquartile"].index(
+                        st.session_state.semantic_params["threshold_type"]
+                    ),
                     help="Method to determine breakpoints in the text",
+                    key="threshold_type_select"
                 )
             with col2:
                 semantic_params["threshold_amount"] = st.slider(
                     "Breakpoint Threshold Amount",
                     0.0,
                     1.0,
-                    0.95,
+                    st.session_state.semantic_params["threshold_amount"],
                     0.01,
                     help="Threshold for determining breakpoints",
+                    key="threshold_amount_slider"
                 )
             semantic_params["number_of_chunks"] = st.slider(
                 "Number of Chunks",
                 10,
                 1000,
-                500,
+                st.session_state.semantic_params["number_of_chunks"],
                 help="Target number of chunks to create",
+                key="number_of_chunks_slider"
             )
+            st.session_state.semantic_params = semantic_params
 
-    if st.button("Process PDF", key="process_pdf_button"):
-        if "Semantic" in selected_splitters and not st.session_state.api_key:
-            st.error("❗ OpenAI API Key is required for the Semantic Splitter.")
-            return
-        with st.spinner("Processing..."):
-            try:
-                results = {}
-                for splitter in selected_splitters:
-                    if splitter.lower() == "semantic":
-                        results[splitter] = split_text(
-                            st.session_state.pdf_data,
-                            splitter.lower(),
-                            semantic_params=semantic_params,
-                            api_key=st.session_state.get("api_key"),
-                        )
-                    else:
-                        results[splitter] = split_text(
-                            st.session_state.pdf_data,
-                            splitter.lower(),
-                            chunk_size,
-                            chunk_overlap,
-                            api_key=st.session_state.get("api_key"),
-                        )
-
-                    st.success(
-                        f"{splitter} splitter: Text split into {results[splitter]['chunk_count']} chunks in {results[splitter]['processing_time']:.2f} seconds"
-                    )
-
-                display_splitting_results(results)
-                st.session_state.split_results = {
-                    splitter: result["splits"] for splitter, result in results.items()
-                }
-                st.session_state.recommended_splitter = min(
-                    results, key=lambda x: results[x]["coefficient_of_variation"]
-                )
-
-                # Display chunks for both single and multiple splitters
-                st.subheader("Chunk Comparison")
-
-                # Determine the number of chunks to display
-                num_chunks = min(5, min(len(results[splitter]['splits']) for splitter in selected_splitters))
-
-                for i in range(num_chunks):
-                    with st.expander(f"Chunk {i+1}"):
-                        # Create tabs for different views
-                        tab_full, tab_diff = st.tabs(["Full Content", "Differences"])
-
-                        with tab_full:
-                            # Display full content of each chunk
-                            for splitter in selected_splitters:
-                                st.markdown(f"**{splitter} splitter:**")
-                                st.text_area(
-                                    f"{splitter} chunk content",
-                                    results[splitter]['splits'][i].page_content,
-                                    height=200,
-                                    key=f"{splitter}_chunk_{i}"
+    # Show Process PDF button only if no results exist for current selection
+    if not st.session_state.get('splitting_results') or selection_changed:
+        if st.button("Process PDF", key="process_pdf_button"):
+            if "Semantic" in selected_splitters and not st.session_state.api_key:
+                st.error("❗ OpenAI API Key is required for the Semantic Splitter.")
+                return
+            if selected_splitters:
+                with st.spinner("Processing..."):
+                    try:
+                        results = {}
+                        for splitter in selected_splitters:
+                            if splitter.lower() == "semantic":
+                                results[splitter] = split_text(
+                                    st.session_state.pdf_data,
+                                    splitter.lower(),
+                                    semantic_params=semantic_params,
+                                    api_key=st.session_state.get("api_key"),
+                                )
+                            else:
+                                results[splitter] = split_text(
+                                    st.session_state.pdf_data,
+                                    splitter.lower(),
+                                    chunk_size,
+                                    chunk_overlap,
+                                    api_key=st.session_state.get("api_key"),
                                 )
 
-                        with tab_diff:
-                            if len(selected_splitters) > 1:
-                                # Add color legend and explanation
-                                st.markdown("""
-                                **Color Legend:**
-                                <span style="background-color: #aaffaa;">Green</span>: Text present in the second splitter but not in the first
-                                <span style="background-color: #ffaaaa;">Red</span>: Text present in the first splitter but not in the second
-                                <span style="background-color: #ffffaa;">Yellow</span>: Minor changes or differences in whitespace
+                            st.success(
+                                f"{splitter} splitter: Text split into {results[splitter]['chunk_count']} chunks in {results[splitter]['processing_time']:.2f} seconds"
+                            )
 
-                                The differences shown below compare each pair of splitters. Lines without coloring are identical between the two splitters being compared.
-                                """, unsafe_allow_html=True)
+                        display_splitting_results(results)
+                        st.session_state.split_results = {
+                            splitter: result["splits"] for splitter, result in results.items()
+                        }
+                        st.session_state.splitting_results = results
+                        st.session_state.recommended_splitter = min(
+                            results, key=lambda x: results[x]["coefficient_of_variation"]
+                        )
 
-                                st.markdown("---")
-
-                                # Create pairwise comparisons
-                                for j, (splitter1, splitter2) in enumerate(combinations(selected_splitters, 2)):
-                                    st.markdown(f"**Difference between {splitter1} and {splitter2}:**")
-
-                                    d = difflib.Differ()
-                                    diff = list(d.compare(results[splitter1]['splits'][i].page_content.splitlines(),
-                                                          results[splitter2]['splits'][i].page_content.splitlines()))
-
-                                    # Color-code the differences
-                                    html_diff = []
-                                    for line in diff:
-                                        if line.startswith('+'):
-                                            html_diff.append(f'<span style="background-color: #aaffaa;">{line}</span>')
-                                        elif line.startswith('-'):
-                                            html_diff.append(f'<span style="background-color: #ffaaaa;">{line}</span>')
-                                        elif line.startswith('?'):
-                                            html_diff.append(f'<span style="background-color: #ffffaa;">{line}</span>')
-                                        else:
-                                            html_diff.append(line)
-
-                                    st.markdown('<br>'.join(html_diff), unsafe_allow_html=True)
-                                    st.markdown("---")
-                            else:
-                                st.info("Select more than one splitter to see differences.")
-
-            except Exception as e:
-                handle_error(e, "Error processing PDF")
+                    except Exception as e:
+                        handle_error(e, "Error processing PDF")
+            else:
+                st.error("Please select at least one splitter type.")
+    
+    # Display existing results if available
+    elif st.session_state.get('splitting_results'):
+        display_splitting_results(st.session_state.splitting_results)
 
 
 
@@ -737,100 +919,132 @@ def retriever_page() -> None:
     # Show test options if retriever is created
     if st.session_state.get("retriever_created", False):
         st.subheader("Test Retriever")
+        
+        # Store query and retrieved documents in session state
+        if "current_query" not in st.session_state:
+            st.session_state.current_query = ""
+        if "current_retrieved_docs" not in st.session_state:
+            st.session_state.current_retrieved_docs = {}
+        if "hyde_doc" not in st.session_state:
+            st.session_state.hyde_doc = None
+            
         query = st.text_input(
-            "Enter a query to test the retriever:", key="retriever_query"
+            "Enter a query to test the retriever:", 
+            key="retriever_query"
         )
+        
+        # Modified retrieval logic to handle same query and show HYDE docs
         if st.button("Retrieve", key="retrieve_button"):
             if not query.strip():
                 st.error("❗ Please enter a valid query.")
             else:
-                st.session_state.query = query
-                st.session_state.retrieval_done = True
+                with st.spinner("Retrieving documents..."):
+                    try:
+                        # If HYDE was used, generate and store the document
+                        if st.session_state.get("use_hyde", False):
+                            hyde_doc = display_hyde_generations(query, return_doc=True)
+                            st.session_state.hyde_doc = hyde_doc
+                        
+                        # Store retrieved documents in session state
+                        base_docs = retrieve_documents(
+                            st.session_state.base_retriever, query
+                        )
+                        st.session_state.current_retrieved_docs["base"] = base_docs
 
-        if st.session_state.get("retrieval_done", False):
-            query = st.session_state.query
-            with st.spinner("Retrieving documents..."):
-                try:
-                    base_docs = retrieve_documents(
-                        st.session_state.base_retriever, query
-                    )
-
-                    comparison_docs = []
-                    if st.session_state.current_retriever_type != "Vector Store Retriever":
-                        if st.session_state.current_retriever_type == "Vector Store Retriever with Reranker":
-                            comparison_docs = retrieve_documents(
-                                st.session_state.reranker_retriever, query
-                            )
-                        elif st.session_state.current_retriever_type == "Ensemble Retriever (BM25 + Vector Store)":
-                            comparison_docs = retrieve_documents(
-                                st.session_state.hybrid_retriever, query
-                            )
-                        elif st.session_state.current_retriever_type == "Ensemble Retriever with Reranker":
-                            comparison_docs = retrieve_documents(
-                                st.session_state.hybrid_reranker_retriever, query
-                            )
-
-                    st.subheader("Retrieved Documents")
-
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        st.markdown("### Base Retriever")
-                        display_retrieved_docs(base_docs, "Base Retriever")
-
-                    with col2:
                         if st.session_state.current_retriever_type != "Vector Store Retriever":
-                            st.markdown(
-                                f"### {st.session_state.current_retriever_type}"
-                            )
-                            display_retrieved_docs(
-                                comparison_docs, st.session_state.current_retriever_type
-                            )
-                        else:
-                            st.markdown("### Comparison")
-                            st.info(
-                                "No comparison retriever selected. Using Vector Store Retriever only."
-                            )
-
-                    st.subheader("Embedding Visualization")
-                    method = st.selectbox(
-                        "Choose visualization method", ["pacmap", "umap", "tsne"]
-                    )
-                    dimensions = st.radio("Choose dimensions", [2, 3])
-                    sample_size = st.number_input(
-                        "Sample size (leave 0 for all)",
-                        min_value=0,
-                        max_value=10000,
-                        value=0,
-                        step=100,
-                    )
-
-                    if st.button("Show Embedding Visualization", key="show_embedding_viz_button"):
-                        with st.spinner("Creating embedding visualization..."):
-                            try:
-                                retrieved_docs = {"Base": base_docs}
-                                if st.session_state.current_retriever_type != "Vector Store Retriever":
-                                    retrieved_docs[
-                                        st.session_state.current_retriever_type
-                                    ] = comparison_docs
-
-                                fig = create_embedding_visualization(
-                                    st.session_state.vectorstore,
-                                    st.session_state.split_results[
-                                        st.session_state.recommended_splitter
-                                    ],
-                                    query,
-                                    retrieved_docs,
-                                    method=method,
-                                    sample_size=sample_size if sample_size > 0 else None,
-                                    dimensions=dimensions,
-                                    api_key=st.session_state.get("api_key"),
+                            if st.session_state.current_retriever_type == "Vector Store Retriever with Reranker":
+                                comparison_docs = retrieve_documents(
+                                    st.session_state.reranker_retriever, query
                                 )
-                                st.plotly_chart(fig)
-                            except Exception as e:
-                                handle_error(e, "Error creating embedding visualization")
-                except Exception as e:
-                    handle_error(e, "Error retrieving documents")
+                            elif st.session_state.current_retriever_type == "Ensemble Retriever (BM25 + Vector Store)":
+                                comparison_docs = retrieve_documents(
+                                    st.session_state.hybrid_retriever, query
+                                )
+                            elif st.session_state.current_retriever_type == "Ensemble Retriever with Reranker":
+                                comparison_docs = retrieve_documents(
+                                    st.session_state.hybrid_reranker_retriever, query
+                                )
+                            st.session_state.current_retrieved_docs["comparison"] = comparison_docs
+                        
+                        st.session_state.retrieval_done = True
+                        st.session_state.current_query = query
+                    except Exception as e:
+                        handle_error(e, "Error retrieving documents")
+
+        # Display retrieved documents if they exist
+        if st.session_state.get("retrieval_done", False) and st.session_state.get("current_retrieved_docs"):
+            st.subheader("Retrieved Documents")
+
+            # Display HYDE document if it exists (in an expander)
+            if st.session_state.get("use_hyde", False) and st.session_state.get("hyde_doc"):
+                with st.expander("HYDE Generated Document", expanded=True):
+                    st.markdown(f"**Generated Hypothetical Document:**\n\n{st.session_state.hyde_doc}")
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("### Base Retriever")
+                if "base" in st.session_state.current_retrieved_docs:
+                    display_retrieved_docs(
+                        st.session_state.current_retrieved_docs["base"], 
+                        "Base Retriever"
+                    )
+
+            with col2:
+                if st.session_state.current_retriever_type != "Vector Store Retriever":
+                    st.markdown(f"### {st.session_state.current_retriever_type}")
+                    if "comparison" in st.session_state.current_retrieved_docs:
+                        display_retrieved_docs(
+                            st.session_state.current_retrieved_docs["comparison"],
+                            st.session_state.current_retriever_type
+                        )
+                else:
+                    st.markdown("### Comparison")
+                    st.info(
+                        "No comparison retriever selected. Using Vector Store Retriever only."
+                    )
+
+            # Embedding visualization section
+            st.subheader("Embedding Visualization")
+            method = st.selectbox(
+                "Choose visualization method", 
+                ["pacmap", "umap", "tsne"]
+            )
+            dimensions = st.radio("Choose dimensions", [2, 3])
+            sample_size = st.number_input(
+                "Sample size (leave 0 for all)",
+                min_value=0,
+                max_value=10000,
+                value=0,
+                step=100,
+            )
+
+            if st.button("Show Embedding Visualization", key="show_embedding_viz_button"):
+                with st.spinner("Creating embedding visualization..."):
+                    try:
+                        retrieved_docs = {
+                            "Base": st.session_state.current_retrieved_docs["base"]
+                        }
+                        if "comparison" in st.session_state.current_retrieved_docs:
+                            retrieved_docs[st.session_state.current_retriever_type] = (
+                                st.session_state.current_retrieved_docs["comparison"]
+                            )
+
+                        fig = create_embedding_visualization(
+                            st.session_state.vectorstore,
+                            st.session_state.split_results[
+                                st.session_state.recommended_splitter
+                            ],
+                            st.session_state.current_query,
+                            retrieved_docs,
+                            method=method,
+                            sample_size=sample_size if sample_size > 0 else None,
+                            dimensions=dimensions,
+                            api_key=st.session_state.get("api_key"),
+                        )
+                        st.plotly_chart(fig)
+                    except Exception as e:
+                        handle_error(e, "Error creating embedding visualization")
 
 
 def rag_chain_page() -> None:
@@ -907,19 +1121,33 @@ def rag_chain_page() -> None:
 
 # Main Function
 def main() -> None:
-    st.title("🔍 RAGExplorer")
+    st.title("RAGExplorer")
     st.markdown("Explore the inner workings of Retrieval-Augmented Generation (RAG)")
 
     # Add OpenAI API Key input in the sidebar
     with st.sidebar:
-        st.markdown("## OpenAI API Key")
-        api_key = st.text_input("Enter your OpenAI API Key:", type="password", key="openai_api_key_input")
-
-        if api_key:
-            st.success("API Key provided!")
-            st.session_state.api_key = api_key  # Store the API key in session state
-        else:
-            st.warning("Please enter your OpenAI API Key to use the application.")
+        # Add RAG logo at the top of sidebar
+        rag_logo = Image.open("rag.png")
+        st.image(rag_logo,width=220)
+        
+        st.markdown("## LLM Selection")
+        llm_provider = st.selectbox(
+            "Choose LLM Provider:",
+            ["OpenAI", "Google Gemini"],
+            key="llm_provider"
+        )
+        
+        if llm_provider == "OpenAI":
+            st.markdown("## OpenAI API Key")
+            api_key = st.text_input("Enter your OpenAI API Key:", type="password", key="openai_api_key_input")
+            if api_key:
+                st.success("OpenAI API Key provided!")
+                st.session_state.api_key = api_key
+            else:
+                st.warning("Please enter your OpenAI API Key to use OpenAI models.")
+        else:  # Google Gemini
+            st.success("Using Google Gemini - No API key required!")
+            st.session_state.api_key = st.secrets.get("GOOGLE_API_KEY")
 
         st.markdown("---")
         # Determine which steps are available

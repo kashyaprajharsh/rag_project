@@ -81,6 +81,10 @@ coverage.xml
 local_settings.py
 db.sqlite3
 
+# Streamlit secrets
+.streamlit/secrets.toml
+
+
 # Flask stuff:
 instance/
 .webassets-cache

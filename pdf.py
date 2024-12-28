@@ -2,12 +2,16 @@ from langchain_community.document_loaders import PyPDFLoader, OnlinePDFLoader
 from langchain.text_splitter import CharacterTextSplitter, RecursiveCharacterTextSplitter, TokenTextSplitter
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import tempfile
 import requests
 import os
 import time
 import numpy as np
 from collections import Counter
+import streamlit as st
+from vectordb import get_embeddings
+
 
 def load_pdf_data(pdf_sources, method='normal'):
     all_data = []
@@ -97,7 +101,10 @@ def calculate_vocabulary_retention(original_text, split_chunks):
     return len(split_vocab.intersection(original_vocab)) / len(original_vocab)
 
 def split_text(data, splitter_type='character', chunk_size=1000, chunk_overlap=200, semantic_params=None, api_key=None):
-    if not api_key:
+    provider = st.session_state.get("llm_provider", "OpenAI")
+    
+    # Only require API key for semantic splitting with OpenAI
+    if splitter_type == 'semantic' and provider == "OpenAI" and not api_key:
         raise ValueError("OpenAI API Key is required for semantic splitting. Please provide it in the sidebar.")
     
     start_time = time.time()
@@ -112,7 +119,7 @@ def split_text(data, splitter_type='character', chunk_size=1000, chunk_overlap=2
     elif splitter_type == 'token':
         text_splitter = TokenTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     elif splitter_type == 'semantic':
-        embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+        embeddings = get_embeddings(api_key=api_key, provider=provider)
         text_splitter = SemanticChunker(
             embeddings=embeddings,
             breakpoint_threshold_type=semantic_params['threshold_type'],

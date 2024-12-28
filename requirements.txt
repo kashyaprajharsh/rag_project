@@ -14,6 +14,7 @@ langchain-community
 sentence-transformers
 rapidocr-onnxruntime
 langchain-openai
+langchain-google-genai
 langchain-experimental
 langchain-chroma
 chromadb==0.4.0
