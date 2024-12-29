@@ -19,8 +19,14 @@ from vectordb import (
     create_embedding_visualization,
     display_hyde_generations,
 )
-from rag import generate_all_rag_answers, RAG_TYPES
+from rag import generate_all_rag_answers, RAG_TYPES, get_llm
 from agentic_rag import initialize_components, run_rag_bot_stream
+from rag_fusion import (
+    generate_fusion_queries,
+    reciprocal_rank_fusion,
+    create_fusion_visualization,
+    get_fusion_chain
+)
 
 from streamlit_option_menu import option_menu
 from functools import partial
@@ -109,7 +115,15 @@ def initialize_session_state() -> None:
 logger.info("Starting application...")
 
 # Add at the top of the file with other global variables
-steps = ["Home", "PDF Loading", "Text Splitting", "Retriever", "RAG Chain", "Agentic RAG"]
+steps = [
+    "Home",
+    "PDF Loading", 
+    "Text Splitting", 
+    "Retriever", 
+    "RAG Chain",
+    "RAG Fusion",
+    "Agentic RAG"
+]
 
 # Centralized Error Handling
 def handle_error(e: Exception, user_message: str = "An error occurred") -> None:
@@ -1264,6 +1278,155 @@ def agentic_rag_page() -> None:
                     "content": f"❌ {error_message}"
                 })
 
+def rag_fusion_page() -> None:
+    st.header("🔄 RAG Fusion")
+    
+    if not st.session_state.get("retriever_created"):
+        st.warning("Please create a retriever first in the Retriever step.")
+        return
+        
+    st.markdown("""
+    ### About RAG Fusion
+    RAG Fusion improves retrieval accuracy by:
+    1. Generating multiple queries from your question
+    2. Retrieving documents for each query
+    3. Combining results using Reciprocal Rank Fusion
+    
+    Try asking a question to see how it works!
+    """)
+    
+    # Initialize session state for fusion chat history
+    if "fusion_messages" not in st.session_state:
+        st.session_state.fusion_messages = []
+    if "fusion_results" not in st.session_state:
+        st.session_state.fusion_results = []
+    
+    # Display chat history
+    for message in st.session_state.fusion_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            
+            # If this is an assistant message, show the associated results
+            if message["role"] == "assistant" and len(st.session_state.fusion_results) > 0:
+                result_index = len([m for m in st.session_state.fusion_messages[:st.session_state.fusion_messages.index(message)] 
+                                  if m["role"] == "assistant"])
+                if result_index < len(st.session_state.fusion_results):
+                    viz_data = st.session_state.fusion_results[result_index]
+                    
+                    # Show generated queries
+                    with st.expander("Generated Queries", expanded=False):
+                        for i, q in enumerate(viz_data["queries"], 1):
+                            st.markdown(f"{i}. {q}")
+                    
+                    # Display metrics
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Original Documents", viz_data["metrics"]["num_original_docs"])
+                    with col2:
+                        st.metric("Fused Documents", viz_data["metrics"]["num_fused_docs"])
+                    with col3:
+                        st.metric("Queries Generated", viz_data["metrics"]["queries_generated"])
+                    
+                    # Visualization in expander with side-by-side graphs
+                    with st.expander("Rank Changes Visualization", expanded=False):
+                        # Create a single figure with two subplots
+                        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+                        
+                        # First subplot: Rank Changes
+                        changes = viz_data["metrics"]["rank_changes"]
+                        doc_ids = list(changes.keys())
+                        rank_changes = [c["change"] for c in changes.values()]
+                        
+                        ax1.bar(range(len(doc_ids)), rank_changes)
+                        ax1.set_xlabel("Document ID")
+                        ax1.set_ylabel("Rank Change")
+                        ax1.set_title("Document Rank Changes")
+                        plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
+                        
+                        # Second subplot: Score Distribution
+                        doc_indices = range(len(viz_data["fused_docs"]))
+                        scores = [score for _, score in viz_data["fused_docs"]]
+                        
+                        ax2.bar(doc_indices, scores, alpha=0.6)
+                        ax2.set_xlabel("Document Rank")
+                        ax2.set_ylabel("Fusion Score")
+                        ax2.set_title("Document Scores After Fusion")
+                        
+                        # Adjust layout to prevent overlap
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                    
+                    # Display all retrieved documents in an expander
+                    with st.expander("Retrieved Documents", expanded=False):
+                        st.markdown("### All Retrieved Documents")
+                        for i, (doc, score) in enumerate(viz_data["fused_docs"], 1):
+                            st.markdown(f"### Document {i}")
+                            st.markdown(f"**Score:** {score:.3f}")
+                            st.markdown("**Content:**")
+                            st.markdown(doc.page_content)
+                            st.markdown("**Metadata:**")
+                            st.json(doc.metadata)
+                            st.markdown("---")
+    
+    # Chat input
+    if query := st.chat_input("Ask a question about your documents..."):
+        # Add user message to chat history
+        st.session_state.fusion_messages.append({"role": "user", "content": query})
+        
+        try:
+            with st.spinner("Processing with RAG Fusion..."):
+                # Get LLM
+                llm = get_llm(api_key=st.session_state.get("api_key"))
+                
+                # Generate multiple queries
+                queries = generate_fusion_queries(query, llm)
+                
+                # Get documents for each query using invoke instead of get_relevant_documents
+                retriever = st.session_state.selected_retriever
+                all_results = [retriever.invoke(q) for q in queries]
+                
+                # Apply fusion
+                fused_results = reciprocal_rank_fusion(all_results)
+                
+                # Create visualization data
+                viz_data = create_fusion_visualization(
+                    all_results[0],  # Original results
+                    fused_results,   # Fused results
+                    queries
+                )
+                
+                # Store results
+                viz_data["queries"] = queries
+                viz_data["fused_docs"] = fused_results
+                st.session_state.fusion_results.append(viz_data)
+                
+                # Generate response using fused results
+                context = "\n\n".join(doc.page_content for doc, _ in fused_results[:3])
+                response = llm.invoke(
+                    f"""Based on the following context, answer the question: {query}
+                    
+                    Context:
+                    {context}
+                    
+                    Answer:"""
+                )
+                
+                # Add assistant message to chat history
+                st.session_state.fusion_messages.append({
+                    "role": "assistant",
+                    "content": response.content if hasattr(response, 'content') else str(response)
+                })
+                
+                st.rerun()
+                
+        except Exception as e:
+            st.error(f"Error during RAG Fusion: {str(e)}")
+            st.session_state.fusion_messages.append({
+                "role": "assistant",
+                "content": f"❌ Error: {str(e)}"
+            })
+            st.rerun()
+
 # Main Function
 def main() -> None:
     st.title("RAGExplorer")
@@ -1303,11 +1466,12 @@ def main() -> None:
             "Text Splitting": "pdf_data" in st.session_state and st.session_state.pdf_data,
             "Retriever": "split_results" in st.session_state and st.session_state.split_results,
             "RAG Chain": "vectorstore" in st.session_state and st.session_state.vectorstore and st.session_state.get("api_key"),
+            "RAG Fusion": "vectorstore" in st.session_state and st.session_state.vectorstore and st.session_state.get("api_key"),
             "Agentic RAG": "vectorstore" in st.session_state and st.session_state.vectorstore and st.session_state.get("api_key")
         }
 
         # Sidebar Navigation using option_menu
-        steps = ["Home", "PDF Loading", "Text Splitting", "Retriever", "RAG Chain", "Agentic RAG"]
+        steps = ["Home", "PDF Loading", "Text Splitting", "Retriever", "RAG Chain", "RAG Fusion", "Agentic RAG"]
         selected = option_menu(
             menu_title=None,
             options=steps,
@@ -1342,6 +1506,7 @@ def main() -> None:
         "Text Splitting": text_splitting_page,
         "Retriever": retriever_page,
         "RAG Chain": rag_chain_page,
+        "RAG Fusion": rag_fusion_page,
         "Agentic RAG": agentic_rag_page,
     }
 
@@ -1374,6 +1539,8 @@ def main() -> None:
             elif current_step_name == "Retriever":
                 step_completed = st.session_state.get("retriever_created", False)
             elif current_step_name == "RAG Chain":
+                step_completed = st.session_state.get("vectorstore", False) and st.session_state.get("api_key", False)
+            elif current_step_name == "RAG Fusion":
                 step_completed = st.session_state.get("vectorstore", False) and st.session_state.get("api_key", False)
 
             if st.button("Next ➡️"):

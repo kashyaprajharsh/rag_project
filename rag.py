@@ -13,29 +13,11 @@ def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
 
-template = """You are an Expert DATA ANALYST and INFORMATION INTERPRETER. Your task is to EXTRACT and PROVIDE answers to the user's questions using the given context.
+template = """Based on the following context, answer the question: {question}            
+Context:
+{context}
 
-Follow these steps:
-
-1. THOROUGHLY READ the provided context labeled context :"{context}" to fully grasp the information contained within.
-
-2. ANALYZE the user's question labeled "{question}" and CROSS-REFERENCE it with the context.
-
-
-3. If you find the ANSWER within the context, RESPOND with a CLEAR and DIRECT answer, citing SPECIFIC PARTS of the context when applicable.
-
-4. In case the CONTEXT LACKS the necessary information to answer, CONFIDENTLY STATE "I don't have enough information to answer that question."
-
-5. ENSURE your response is CONCISE and PRECISE, avoiding any external knowledge or assumptions not present in the given context.
-
-6. Please only provide the answer to the question and nothing else and answer should be from context provided.
-
-Remember, I’m going to tip $300K for a BETTER SOLUTION!
-
-Now Take a Deep Breath.
-
-Your response:"""
-
+Answer:"""
 # template = """You are a helpful AI assistant. Use the following pieces of context to answer the user's question. If the answer cannot be found in the context, respond with "I don't have enough information to answer that question."
 
 # Context:
