@@ -5,20 +5,3 @@ secondaryBackgroundColor="#08081E"
 textColor="#ffffff"      # Pure white for clarity
 font = "sans serif"
 
-[server.headers]
-Content-Security-Policy = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: gap: https: http:;"
-X-Frame-Options = "SAMEORIGIN"
-    
-[server]
-enableCORS = false
-enableXsrfProtection = true
-    
-[browser]
-gatherUsageStats = false
-
-# Custom Colors for Alerts and Status
-[theme.colors]
-success = "#43A047"
-warning = "#FFA000"
-danger = "#E53935"
-accent = "#FF7043"
