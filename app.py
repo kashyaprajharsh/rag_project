@@ -141,7 +141,7 @@ def display_pdf_content(data: List[Any]) -> None:
             if "images" in page.metadata:
                 for j, img_data in enumerate(page.metadata["images"]):
                     img = Image.open(io.BytesIO(img_data))
-                    st.image(img, caption=f"Image {j+1}", use_column_width=True)
+                    st.image(img, caption=f"Image {j+1}", use_container_width=True)
 
 # Display Retrieved Documents
 def display_retrieved_docs(docs: List[Any], retriever_name: str) -> None:
@@ -424,14 +424,21 @@ def get_pdf_display_path(pdf_source):
 
 def displayPDF(file_path):
     """
-    Display PDF in the Streamlit app
+    Display PDF in the Streamlit app using PDF viewer component
     """
     try:
         with open(file_path, "rb") as f:
             base64_pdf = base64.b64encode(f.read()).decode('utf-8')
         
-        # Embedding PDF in HTML
-        pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600" type="application/pdf"></iframe>'
+        # Using object tag instead of iframe
+        pdf_display = f"""
+            <object data="data:application/pdf;base64,{base64_pdf}" 
+                    type="application/pdf"
+                    width="100%"
+                    height="600">
+                    <p>Unable to display PDF file. <a href="data:application/pdf;base64,{base64_pdf}" download="document.pdf">Download</a> instead.</p>
+            </object>
+        """
         
         # Displaying File
         st.markdown(pdf_display, unsafe_allow_html=True)
