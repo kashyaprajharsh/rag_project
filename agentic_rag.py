@@ -505,13 +505,13 @@ def run_rag_bot_stream(query: str, api_key=None):
     config = RunnableConfig(recursion_limit=10)
     for output in app.stream(inputs, config):
         for key, value in output.items():
-            pprint(f"Finished running: {key}:")
+            #print(f"Finished running: {key}:")
             if isinstance(value, dict) and "generation" in value:
                 yield {"type": "generation", "key": key, "content": value["generation"]}
-                pprint(value["generation"])  
+                #pprint(value["generation"])  
             else:
                 yield {"type": "process", "key": key, "content": value}
-                pprint(value)
+                #pprint(value)
         print("\n")
 
 if __name__ == "__main__":
