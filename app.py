@@ -330,6 +330,133 @@ def display_splitting_results(results: Dict[str, Any]) -> None:
                 f"Based on {metric}, the recommended splitter is: **{recommended_splitter}**"
             )
 
+    # Add chunk comparison section
+    st.subheader("Chunk Comparison")
+
+    # Determine the number of chunks to display first
+    num_chunks = min(5, min(len(results[splitter]['splits']) for splitter in results.keys()))
+
+    # Add a summary view of all chunks
+    #st.markdown("### Overview")
+    overview_data = []
+    for i in range(num_chunks):
+        chunk_stats = {}
+        for splitter in results.keys():
+            chunk = results[splitter]['splits'][i].page_content
+            chunk_stats[f"{splitter}_length"] = len(chunk)
+            chunk_stats[f"{splitter}_words"] = len(chunk.split())
+        overview_data.append(chunk_stats)
+    
+    overview_df = pd.DataFrame(overview_data)
+    #st.dataframe(overview_df)
+
+    # Add chunk navigation
+    selected_chunk = st.select_slider(
+        "Navigate chunks:",
+        options=range(num_chunks),
+        format_func=lambda x: f"Chunk {x+1}"
+    )
+
+    def get_diff_stats(text1: str, text2: str) -> Dict[str, float]:
+        """Calculate similarity statistics between two texts."""
+        return {
+            "similarity": difflib.SequenceMatcher(None, text1, text2).ratio(),
+            "length_diff": abs(len(text1) - len(text2)),
+            "word_diff": abs(len(text1.split()) - len(text2.split()))
+        }
+
+    # Display selected chunk
+    with st.expander(f"Chunk {selected_chunk+1}", expanded=True):
+        # Create tabs for different views
+        tab_full, tab_diff, tab_stats = st.tabs(["Full Content", "Differences", "Statistics"])
+
+        with tab_full:
+            # Display full content of each chunk with better formatting
+            for splitter in results.keys():
+                st.markdown(f"### {splitter} splitter")
+                chunk = results[splitter]['splits'][selected_chunk].page_content
+                st.code(chunk, language="text")
+                st.caption(f"Length: {len(chunk)} chars, {len(chunk.split())} words")
+
+        with tab_diff:
+            if len(results) > 1:
+                # Add color legend with better styling
+                st.markdown("""
+                <style>
+                .diff-legend {
+                    padding: 10px;
+                    border-radius: 5px;
+                    margin-bottom: 20px;
+                }
+                .diff-added { background-color: #aaffaa; padding: 2px 5px; border-radius: 3px; }
+                .diff-removed { background-color: #ffaaaa; padding: 2px 5px; border-radius: 3px; }
+                .diff-changed { background-color: #ffffaa; padding: 2px 5px; border-radius: 3px; }
+                </style>
+                <div class="diff-legend">
+                    <h4>Difference Legend:</h4>
+                    <p><span class="diff-added">Added text</span> - Present in second splitter only</p>
+                    <p><span class="diff-removed">Removed text</span> - Present in first splitter only</p>
+                    <p><span class="diff-changed">Changed text</span> - Minor changes or whitespace differences</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # Create pairwise comparisons with statistics
+                for splitter1, splitter2 in combinations(results.keys(), 2):
+                    st.markdown(f"#### Comparing {splitter1} vs {splitter2}")
+                    
+                    text1 = results[splitter1]['splits'][selected_chunk].page_content
+                    text2 = results[splitter2]['splits'][selected_chunk].page_content
+                    
+                    # Add similarity metrics
+                    stats = get_diff_stats(text1, text2)
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Similarity", f"{stats['similarity']:.1%}")
+                    with col2:
+                        st.metric("Length Difference", stats['length_diff'])
+                    with col3:
+                        st.metric("Word Difference", stats['word_diff'])
+
+                    # Show diff with improved formatting
+                    d = difflib.Differ()
+                    diff = list(d.compare(text1.splitlines(), text2.splitlines()))
+
+                    # Group differences for better readability
+                    formatted_diff = []
+                    current_group = []
+                    
+                    for line in diff:
+                        if line.startswith('?'):
+                            continue
+                        if line.startswith(' ') and current_group:
+                            # Add context line after changes
+                            current_group.append(line)
+                            if len(current_group) >= 3:  # Show some context
+                                formatted_diff.extend(current_group)
+                                current_group = []
+                        else:
+                            current_group.append(line)
+                    
+                    if current_group:
+                        formatted_diff.extend(current_group)
+
+                    # Display formatted diff
+                    st.code('\n'.join(formatted_diff), language="diff")
+
+        with tab_stats:
+            # Add detailed statistics about the chunk
+            for splitter in results.keys():
+                chunk = results[splitter]['splits'][selected_chunk].page_content
+                st.markdown(f"### {splitter} Statistics")
+                stats_col1, stats_col2 = st.columns(2)
+                with stats_col1:
+                    st.metric("Characters", len(chunk))
+                    st.metric("Words", len(chunk.split()))
+                    st.metric("Lines", len(chunk.splitlines()))
+                with stats_col2:
+                    st.metric("Avg Word Length", sum(len(w) for w in chunk.split()) / len(chunk.split()))
+                    st.metric("Sentences", len([s for s in chunk.split('.') if s.strip()]))
+
 
 # Define Pages
 def home_page() -> None:
