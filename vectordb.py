@@ -56,6 +56,14 @@ def create_vectorstore(splits, batch_size=5000, use_hyde=False, api_key=None):
     """
     provider = st.session_state.get("llm_provider", "OpenAI")
     
+    # Create a unique collection name for this session
+    persist_directory = os.path.join(os.getcwd(), "chroma_db")
+    os.makedirs(persist_directory, exist_ok=True)
+    
+    # Create a unique collection name for this session if not exists
+    if "collection_name" not in st.session_state:
+        st.session_state.collection_name = f"rag_collection_{str(uuid4())}"
+    
     if use_hyde:
         llm = get_llm(api_key=api_key, provider=provider)
         embeddings = get_embeddings(api_key=api_key, provider=provider)
@@ -81,13 +89,23 @@ def create_vectorstore(splits, batch_size=5000, use_hyde=False, api_key=None):
             llm_chain=hyde_chain, 
             base_embeddings=embeddings
         )
-        vectorstore = Chroma(embedding_function=hyde_embeddings)
+        vectorstore = Chroma(
+            collection_name=st.session_state.collection_name,
+            embedding_function=hyde_embeddings,
+            persist_directory=persist_directory,
+            create_collection_if_not_exists=True
+        )
         
         # Store the hyde_chain in session state for later inspection
         st.session_state.hyde_chain = hyde_chain
     else:
         embeddings = get_embeddings(api_key=api_key, provider=provider)
-        vectorstore = Chroma(embedding_function=embeddings)
+        vectorstore = Chroma(
+            collection_name=st.session_state.collection_name,
+            embedding_function=embeddings,
+            persist_directory=persist_directory,
+            create_collection_if_not_exists=True
+        )
     
     # Generate UUIDs for all documents
     uuids = [str(uuid4()) for _ in range(len(splits))]
@@ -102,6 +120,8 @@ def create_vectorstore(splits, batch_size=5000, use_hyde=False, api_key=None):
         batch = splits[i:i + batch_size]
         batch_uuids = uuids[i:i + batch_size]
         vectorstore.add_documents(documents=batch, ids=batch_uuids)
+    
+
     
     return vectorstore
 

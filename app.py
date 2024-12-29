@@ -20,6 +20,8 @@ from vectordb import (
     display_hyde_generations,
 )
 from rag import generate_all_rag_answers, RAG_TYPES
+from agentic_rag import initialize_components, run_rag_bot_stream
+
 from streamlit_option_menu import option_menu
 from functools import partial
 import matplotlib.pyplot as plt
@@ -96,7 +98,9 @@ def initialize_session_state() -> None:
             "threshold_type": "percentile",
             "threshold_amount": 0.95,
             "number_of_chunks": 500
-        }
+        },
+        "agentic_rag_history": [],
+        "agentic_rag_initialized": False,
     }
     for key, value in default_state.items():
         if key not in st.session_state:
@@ -105,7 +109,7 @@ def initialize_session_state() -> None:
 logger.info("Starting application...")
 
 # Add at the top of the file with other global variables
-steps = ["Home", "PDF Loading", "Text Splitting", "Retriever", "RAG Chain"]
+steps = ["Home", "PDF Loading", "Text Splitting", "Retriever", "RAG Chain", "Agentic RAG"]
 
 # Centralized Error Handling
 def handle_error(e: Exception, user_message: str = "An error occurred") -> None:
@@ -324,7 +328,6 @@ def home_page() -> None:
         st.write(
             "This application helps you understand Retrieval-Augmented Generation (RAG) and its internal workings."
         )
-
         # What is RAG section
         st.subheader("What is RAG?")
         st.write(
@@ -332,6 +335,14 @@ def home_page() -> None:
             Retrieval-Augmented Generation (RAG) is a technique that combines the power of large language models with 
             external knowledge retrieval. It allows AI models to access and utilize information beyond their training data, 
             leading to more accurate and up-to-date responses.
+            """
+        )
+
+        # Add OpenAI dependency warning for Agentic RAG
+        st.info(
+            """
+            📝 **Note**: The Agentic RAG feature currently only works with OpenAI models. 
+            Support for other LLM providers will be added in future updates.
             """
         )
 
@@ -343,7 +354,6 @@ def home_page() -> None:
             2. **Text Splitting**: Experiment with different text splitting techniques.
             3. **Retriever Methods**: Explore various retriever options.
             4. **RAG Chain**: Test the RAG chain with your own queries.
-            5. **Analyze Results**: Examine the generated results and visualizations.
             """
         )
 
@@ -742,8 +752,6 @@ def text_splitting_page() -> None:
         display_splitting_results(st.session_state.splitting_results)
 
 
-
-
 # Page: Retriever
 
 def retriever_page() -> None:
@@ -903,11 +911,18 @@ def retriever_page() -> None:
                             reranker_type,
                             top_n,
                         )
-                        st.session_state.hybrid_reranker_retriever = (
-                            hybrid_reranker_retriever
-                        )
+                        st.session_state.hybrid_reranker_retriever = hybrid_reranker_retriever
 
+                    # Store the selected retriever type and its corresponding retriever
                     st.session_state.current_retriever_type = retriever_type
+                    if retriever_type == "Vector Store Retriever":
+                        st.session_state.selected_retriever = base_retriever
+                    elif retriever_type == "Vector Store Retriever with Reranker":
+                        st.session_state.selected_retriever = reranker_retriever
+                    elif retriever_type == "Ensemble Retriever (BM25 + Vector Store)":
+                        st.session_state.selected_retriever = hybrid_retriever
+                    else:  # Ensemble Retriever with Reranker
+                        st.session_state.selected_retriever = hybrid_reranker_retriever
                     st.session_state.retriever_created = True  # Track retriever creation
                     st.success(
                         f"{'HYDE ' if st.session_state.use_hyde else ''}Vector Store and {retriever_type} created successfully!"
@@ -1119,6 +1134,136 @@ def rag_chain_page() -> None:
 
         st.rerun()
 
+# Add a new page for Agentic RAG
+def agentic_rag_page() -> None:
+    st.header("🤖 Agentic RAG")
+
+    # Check prerequisites
+    if "pdf_data" not in st.session_state or not st.session_state.pdf_data:
+        st.warning("Please load a PDF first in the PDF Loading step.")
+        return
+
+    if "vectorstore" not in st.session_state or not st.session_state.vectorstore:
+        st.warning("Please create a Vector Store in the Retriever step first.")
+        return
+        
+    if not st.session_state.get("selected_retriever"):
+        st.warning("Please select a retriever in the Retriever step first.")
+        return
+
+    if not st.session_state.get("api_key"):
+        st.warning("Please provide your API Key in the sidebar to use Agentic RAG.")
+        return
+
+    # Check if using OpenAI
+    if st.session_state.get("llm_provider") != "OpenAI":
+        st.error(
+            """
+            ⚠️ Agentic RAG currently only works with OpenAI models. 
+            Please switch to OpenAI in the sidebar to use this feature.
+            Support for other LLM providers will be added in future updates.
+            """
+        )
+        return
+
+    # Add workflow diagram
+    st.markdown("""
+    Below is the workflow diagram showing how the Agentic RAG system processes queries:
+    """)
+    
+    # Display the workflow graph directly
+    st.image("workflow_graph.png",width=225, caption="Agentic RAG Workflow Diagram")
+
+    st.markdown("""
+    ### About Agentic RAG
+    This component uses an intelligent agent to:
+    - Route questions to the most appropriate source (vectorstore or web search)
+    - Grade document relevance
+    - Check for hallucinations
+    - Transform queries for better retrieval
+    """)
+
+    # Initialize components if not already done
+    if not st.session_state.get("agentic_rag_initialized"):
+        try:
+            initialize_components(api_key=st.session_state.get("api_key"))
+            st.session_state.agentic_rag_initialized = True
+        except Exception as e:
+            st.error(f"Error initializing Agentic RAG components: {str(e)}")
+            return
+
+    # Initialize chat history if it doesn't exist
+    if "agentic_messages" not in st.session_state:
+        st.session_state.agentic_messages = []
+
+    # Display chat history
+    for message in st.session_state.agentic_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # Chat input
+    if query := st.chat_input("Ask a question about your documents...", key="agentic_chat_input"):
+        # Add user message to chat history
+        st.session_state.agentic_messages.append({"role": "user", "content": query})
+        
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown(query)
+
+        # Process query and display assistant response
+        with st.chat_message("assistant"):
+            try:
+                # Create two columns for the response
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    answer_container = st.empty()
+                    
+                with col2:
+                    with st.expander("Process Details", expanded=True):
+                        process_container = st.empty()
+                
+                # Track the final answer and process details
+                final_answer = ""
+                process_details = []
+                
+                # Process the query and update the UI in real-time
+                for output in run_rag_bot_stream(query, api_key=st.session_state.get("api_key")):
+                    if output["type"] == "generation":
+                        final_answer = output["content"]
+                        with answer_container:
+                            st.markdown("### Answer")
+                            st.markdown(final_answer)
+                    
+                    # Update process details
+                    process_details.append(f"**{output['key']}**:")
+                    process_details.append(f"{str(output['content'])}\n")
+                    with process_container:
+                        st.markdown("\n".join(process_details))
+                
+                # Add the final answer to chat history
+                if final_answer:
+                    st.session_state.agentic_messages.append({
+                        "role": "assistant",
+                        "content": final_answer
+                    })
+                else:
+                    error_msg = "No answer was generated. Please try rephrasing your question."
+                    st.error(error_msg)
+                    st.session_state.agentic_messages.append({
+                        "role": "assistant",
+                        "content": f"❌ {error_msg}"
+                    })
+                    
+            except Exception as e:
+                error_message = f"Error running Agentic RAG: {str(e)}"
+                st.error(error_message)
+                logger.error(f"Agentic RAG error: {str(e)}", exc_info=True)
+                st.session_state.agentic_messages.append({
+                    "role": "assistant",
+                    "content": f"❌ {error_message}"
+                })
+
 # Main Function
 def main() -> None:
     st.title("RAGExplorer")
@@ -1128,12 +1273,13 @@ def main() -> None:
     with st.sidebar:
         # Add RAG logo at the top of sidebar
         rag_logo = Image.open("rag.png")
-        st.image(rag_logo,width=220)
+        st.image(rag_logo, width=220)
         
         st.markdown("## LLM Selection")
+        # Default to Gemini
         llm_provider = st.selectbox(
             "Choose LLM Provider:",
-            ["OpenAI", "Google Gemini"],
+            ["Google Gemini", "OpenAI"],
             key="llm_provider"
         )
         
@@ -1148,7 +1294,7 @@ def main() -> None:
         else:  # Google Gemini
             st.success("Using Google Gemini - No API key required!")
             st.session_state.api_key = st.secrets.get("GOOGLE_API_KEY")
-
+            
         st.markdown("---")
         # Determine which steps are available
         steps_available = {
@@ -1156,15 +1302,16 @@ def main() -> None:
             "PDF Loading": True,
             "Text Splitting": "pdf_data" in st.session_state and st.session_state.pdf_data,
             "Retriever": "split_results" in st.session_state and st.session_state.split_results,
-            "RAG Chain": "vectorstore" in st.session_state and st.session_state.vectorstore and st.session_state.get("api_key")
+            "RAG Chain": "vectorstore" in st.session_state and st.session_state.vectorstore and st.session_state.get("api_key"),
+            "Agentic RAG": "vectorstore" in st.session_state and st.session_state.vectorstore and st.session_state.get("api_key")
         }
 
         # Sidebar Navigation using option_menu
-        steps = ["Home", "PDF Loading", "Text Splitting", "Retriever", "RAG Chain"]
+        steps = ["Home", "PDF Loading", "Text Splitting", "Retriever", "RAG Chain", "Agentic RAG"]
         selected = option_menu(
             menu_title=None,
             options=steps,
-            icons=["house", "file-pdf", "scissors", "search", "link"],
+            icons=["house", "file-pdf", "scissors", "search", "link", "robot"],
             menu_icon="cast",
             default_index=st.session_state.current_step,
         )
@@ -1195,6 +1342,7 @@ def main() -> None:
         "Text Splitting": text_splitting_page,
         "Retriever": retriever_page,
         "RAG Chain": rag_chain_page,
+        "Agentic RAG": agentic_rag_page,
     }
 
     # Display the selected page
