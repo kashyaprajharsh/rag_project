@@ -5,7 +5,9 @@ secondaryBackgroundColor="#08081E"
 textColor="#ffffff"      # Pure white for clarity
 font = "sans serif"
 
-
+[server.headers]
+Content-Security-Policy = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: gap: https: http:;"
+X-Frame-Options = "SAMEORIGIN"
     
 [server]
 enableCORS = false
