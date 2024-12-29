@@ -424,36 +424,39 @@ def get_pdf_display_path(pdf_source):
 
 def displayPDF(file_path):
     """
-    Display PDF in the Streamlit app using a more secure approach
+    Display PDF in the Streamlit app using PDF.js
     """
     try:
         # Read PDF file
         with open(file_path, "rb") as f:
             base64_pdf = base64.b64encode(f.read()).decode('utf-8')
         
-        # Embed PDF viewer using HTML
+        # PDF.js viewer HTML
         pdf_display = f'''
-            <div style="width:100%; height:600px;">
-                <embed
-                    type="application/pdf"
-                    src="data:application/pdf;base64,{base64_pdf}"
-                    width="100%"
-                    height="100%"
-                />
-            </div>
+            <iframe
+                src="https://mozilla.github.io/pdf.js/web/viewer.html?file=data:application/pdf;base64,{base64_pdf}"
+                width="100%"
+                height="600px"
+                style="border: none;"
+            ></iframe>
         '''
         
-      
         # Display PDF
         st.markdown(pdf_display, unsafe_allow_html=True)
         
     except Exception as e:
         st.error(f"Error displaying PDF: {str(e)}")
-        # Provide download option as fallback
-        with open(file_path, "rb") as f:
-            base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-            download_button = f'<a href="data:application/pdf;base64,{base64_pdf}" download="document.pdf">Download PDF</a>'
-            st.markdown(download_button, unsafe_allow_html=True)
+        try:
+            # Provide download option as fallback
+            with open(file_path, "rb") as f:
+                st.download_button(
+                    label="⬇️ Download PDF",
+                    data=f,
+                    file_name="document.pdf",
+                    mime="application/pdf"
+                )
+        except Exception as download_error:
+            st.error(f"Error creating download button: {str(download_error)}")
 
 def pdf_loading_page() -> None:
     st.header("📄 PDF Loading")
