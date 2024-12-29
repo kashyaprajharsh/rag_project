@@ -424,25 +424,35 @@ def get_pdf_display_path(pdf_source):
 
 def displayPDF(file_path):
     """
-    Display PDF in the Streamlit app using PDF.js
+    Display PDF in the Streamlit app using a local PDF viewer
     """
     try:
         # Read PDF file
         with open(file_path, "rb") as f:
             base64_pdf = base64.b64encode(f.read()).decode('utf-8')
         
-        # PDF.js viewer HTML
-        pdf_display = f'''
-            <iframe
-                src="https://mozilla.github.io/pdf.js/web/viewer.html?file=data:application/pdf;base64,{base64_pdf}"
-                width="100%"
-                height="600px"
-                style="border: none;"
-            ></iframe>
-        '''
+        # Create custom PDF viewer HTML
+        pdf_viewer = f"""
+            <html>
+            <head>
+                <title>PDF Viewer</title>
+                <style>
+                    body {{ margin: 0; }}
+                    #pdf-viewer {{ width: 100%; height: 600px; }}
+                </style>
+            </head>
+            <body>
+                <div id="pdf-viewer"></div>
+                <script src="https://cdnjs.cloudflare.com/ajax/libs/pdfobject/2.2.8/pdfobject.min.js"></script>
+                <script>
+                    PDFObject.embed("data:application/pdf;base64,{base64_pdf}", "#pdf-viewer");
+                </script>
+            </body>
+            </html>
+        """
         
-        # Display PDF
-        st.markdown(pdf_display, unsafe_allow_html=True)
+        # Display PDF using HTML
+        st.components.v1.html(pdf_viewer, height=600)
         
     except Exception as e:
         st.error(f"Error displaying PDF: {str(e)}")
