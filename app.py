@@ -424,22 +424,48 @@ def get_pdf_display_path(pdf_source):
 
 def displayPDF(file_path):
     """
-    Display PDF in the Streamlit app using PDF viewer component
+    Display PDF in the Streamlit app using a more secure approach
     """
     try:
+        # Read PDF file
         with open(file_path, "rb") as f:
             base64_pdf = base64.b64encode(f.read()).decode('utf-8')
         
-        pdf_display =  f"""<embed
-        class="pdfobject"
-        type="application/pdf"
-        title="Embedded PDF"
-        src="data:application/pdf;base64,{base64_pdf}"
-        style="overflow: auto; width: 100%; height: 600px;">"""
-    
+        # Embed PDF viewer using HTML
+        pdf_display = f'''
+            <div style="width:100%; height:600px;">
+                <embed
+                    type="application/pdf"
+                    src="data:application/pdf;base64,{base64_pdf}"
+                    width="100%"
+                    height="100%"
+                />
+            </div>
+        '''
+        
+        # Add CSS to ensure proper display
+        st.markdown(
+            """
+            <style>
+                embed {
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                }
+            </style>
+            """, 
+            unsafe_allow_html=True
+        )
+        
+        # Display PDF
         st.markdown(pdf_display, unsafe_allow_html=True)
+        
     except Exception as e:
         st.error(f"Error displaying PDF: {str(e)}")
+        # Provide download option as fallback
+        with open(file_path, "rb") as f:
+            base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+            download_button = f'<a href="data:application/pdf;base64,{base64_pdf}" download="document.pdf">Download PDF</a>'
+            st.markdown(download_button, unsafe_allow_html=True)
 
 def pdf_loading_page() -> None:
     st.header("📄 PDF Loading")
