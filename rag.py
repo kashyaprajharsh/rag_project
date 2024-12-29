@@ -67,10 +67,11 @@ def create_rag_chain(retriever, llm):
         {"context": retriever, "question": RunnablePassthrough()}
     ).assign(answer=rag_chain_from_docs)
 
-def get_llm(model_name="gpt-4o-mini", api_key=None, provider="OpenAI"):
+def get_llm(model_name="gpt-4o-mini", api_key=None,provider="Google Gemini"):
+    """Get LLM based on provider"""
     if provider == "OpenAI":
         if not api_key:
-            raise ValueError("OpenAI API Key is required. Please provide it in the sidebar.")
+            raise ValueError("OpenAI API Key is required for OpenAI models. Please provide it in the sidebar.")
         return ChatOpenAI(model_name=model_name, temperature=0.1, openai_api_key=api_key)
     else:  # Google Gemini
         return ChatGoogleGenerativeAI(model="gemini-2.0-flash-exp", temperature=0.1)

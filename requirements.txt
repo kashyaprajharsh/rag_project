@@ -17,7 +17,7 @@ langchain-openai
 langchain-google-genai
 langchain-experimental
 langchain-chroma
-chromadb==0.4.0
+chromadb>=0.4.10 
 langchain-cohere
 pysqlite3-binary
 openai
@@ -35,3 +35,6 @@ validators
 extra-streamlit-components
 streamlit-option-menu
 protobuf==3.20.3
+ipython
+langgraph
+# instructor
