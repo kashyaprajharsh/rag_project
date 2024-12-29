@@ -443,19 +443,7 @@ def displayPDF(file_path):
             </div>
         '''
         
-        # Add CSS to ensure proper display
-        st.markdown(
-            """
-            <style>
-                embed {
-                    border: 1px solid #ddd;
-                    border-radius: 4px;
-                }
-            </style>
-            """, 
-            unsafe_allow_html=True
-        )
-        
+      
         # Display PDF
         st.markdown(pdf_display, unsafe_allow_html=True)
         
