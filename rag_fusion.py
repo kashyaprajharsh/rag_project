@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 from typing import List, Dict, Any
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 def reciprocal_rank_fusion(results: List[List[Document]], k: int = 60) -> List[tuple]:
     """
@@ -113,7 +113,7 @@ def get_fusion_chain(retriever: Any, llm: Any):
     """Create a RAG Fusion chain combining query generation and retrieval."""
     def process_queries(input_dict: Dict[str, str]) -> List[List[Document]]:
         queries = generate_fusion_queries(input_dict["question"], llm)
-        return [retriever.get_relevant_documents(q) for q in queries]
+        return [retriever.invoke(q) for q in queries]
     
     return {
         "queries": lambda x: generate_fusion_queries(x["question"], llm),

@@ -1,77 +1,118 @@
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+"""Vector store + retrievers, migrated to Qdrant (in-memory) on LangChain v1.
 
+- ChromaDB is replaced by an in-memory ``QdrantVectorStore`` (no server, no disk)
+  holding dense embeddings.
+- Hybrid retrieval stays **explicit and teachable**: a standalone ``BM25Retriever``
+  (lexical) is fused with the dense Qdrant retriever by ``WeightedEnsembleRetriever``,
+  a small reciprocal-rank-fusion retriever built on ``langchain_core`` so the
+  ``bm25_weight`` / ``vector_weight`` sliders remain meaningful for the demo.
+- Reranking uses a custom ``BaseRetriever`` wrapping Cohere / HuggingFace
+  cross-encoders. The legacy ``ContextualCompressionRetriever`` /
+  ``HypotheticalDocumentEmbedder`` (langchain_classic-only) are intentionally avoided.
+- HyDE is a tiny ``Embeddings`` wrapper instead of the legacy embedder.
+"""
 
-#import chromadb
-
-from langchain_chroma import Chroma
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriever
-from langchain.retrievers.document_compressors import CrossEncoderReranker
-from langchain_community.cross_encoders import HuggingFaceCrossEncoder
-from langchain_cohere import CohereRerank
-from langchain_community.retrievers import BM25Retriever
-from langchain.chains import HypotheticalDocumentEmbedder
 import os
-import openai
-import pacmap
+from typing import Any, Callable, Dict, List, Optional
+from uuid import uuid4
+
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
+import pacmap
 import pandas as pd
-from typing import List, Dict, Callable, Optional
-from langchain.schema import Document
-from umap import UMAP
+import plotly.graph_objects as go
+import streamlit as st
 from sklearn.manifold import TSNE
 from sklearn.metrics.pairwise import cosine_similarity
-import streamlit as st
-from uuid import uuid4
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
+from umap import UMAP
+
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
+from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
+from langchain_core.prompts import PromptTemplate
+from langchain_core.retrievers import BaseRetriever
+from pydantic import Field
+
+from langchain_qdrant import QdrantVectorStore
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Distance, VectorParams
+
+from langchain_community.retrievers import BM25Retriever
+from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+from langchain_cohere import CohereRerank
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_openai import OpenAIEmbeddings
-from rag import get_llm
+
+from rag import get_llm, extract_content
+
+# Surface the Cohere key (used by CohereRerank) without breaking non-Streamlit
+# imports. Only set it when non-empty — an empty value makes the Cohere client
+# send an "Authorization: Bearer " header, which fails as an illegal header.
+try:
+    _cohere_key = st.secrets.get("COHERE_API_KEY", "")
+    if _cohere_key:
+        os.environ["COHERE_API_KEY"] = _cohere_key
+except Exception:
+    pass
 
 
-os.environ["COHERE_API_KEY"] = st.secrets['COHERE_API_KEY']
+def _get_cohere_key() -> str:
+    try:
+        return st.secrets.get("COHERE_API_KEY", "") or os.environ.get("COHERE_API_KEY", "")
+    except Exception:
+        return os.environ.get("COHERE_API_KEY", "")
 
-def get_embeddings(api_key=None, provider="OpenAI"):
+
+def get_embeddings(api_key=None, provider="Google Gemini"):
     if provider == "OpenAI":
         if not api_key:
             raise ValueError("OpenAI API Key is required. Please provide it in the sidebar.")
         return OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=api_key)
     else:  # Google Gemini
-        return GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        kwargs = {"model": "gemini-embedding-2"}
+        if api_key:
+            kwargs["google_api_key"] = api_key
+        return GoogleGenerativeAIEmbeddings(**kwargs)
+
+
+class HyDEEmbeddings(Embeddings):
+    """Hypothetical Document Embeddings.
+
+    Documents are embedded normally; a *query* is first expanded into a
+    hypothetical answer document by ``hyde_chain`` and that text is embedded.
+    Replaces the classic ``HypotheticalDocumentEmbedder``.
+    """
+
+    def __init__(self, hyde_chain: Any, base_embeddings: Embeddings):
+        self.hyde_chain = hyde_chain
+        self.base_embeddings = base_embeddings
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return self.base_embeddings.embed_documents(texts)
+
+    def embed_query(self, text: str) -> List[float]:
+        hypothetical = self.hyde_chain.invoke({"question": text})
+        if hasattr(hypothetical, "content"):
+            hypothetical = hypothetical.content
+        return self.base_embeddings.embed_query(str(hypothetical))
+
 
 def create_vectorstore(splits, batch_size=5000, use_hyde=False, api_key=None):
-    """
-    Create a vector store from the given splits.
-    
+    """Create an in-memory Qdrant (dense) vector store from splits.
+
     :param splits: List of Document objects
-    :param batch_size: Number of documents to process in each batch
-    :param use_hyde: Whether to use HYDE embeddings
-    :param api_key: OpenAI API key
-    :return: Chroma vector store
+    :param batch_size: Number of documents to index per batch
+    :param use_hyde: Whether to use HyDE query embeddings
+    :param api_key: API key (required only for the OpenAI provider)
+    :return: QdrantVectorStore
     """
-    provider = st.session_state.get("llm_provider", "OpenAI")
-    
-    # Create a unique collection name for this session
-    persist_directory = os.path.join(os.getcwd(), "chroma_db")
-    os.makedirs(persist_directory, exist_ok=True)
-    
-    # Create a unique collection name for this session if not exists
-    if "collection_name" not in st.session_state:
-        st.session_state.collection_name = f"rag_collection_{str(uuid4())}"
-    
+    provider = st.session_state.get("llm_provider", "Google Gemini")
+    base_embeddings = get_embeddings(api_key=api_key, provider=provider)
+
     if use_hyde:
         llm = get_llm(api_key=api_key, provider=provider)
-        embeddings = get_embeddings(api_key=api_key, provider=provider)
-        
-        # Custom HYDE prompt for RAG
         hyde_prompt = PromptTemplate(
             input_variables=["question"],
-            template="""Generate a concise, focused document that directly answers the given question. 
+            template="""Generate a concise, focused document that directly answers the given question.
             The document should:
             - Be specific and factual
             - Include key terms and relevant context
@@ -79,121 +120,245 @@ def create_vectorstore(splits, batch_size=5000, use_hyde=False, api_key=None):
             - Focus only on information needed to answer the question
 
             Question: {question}
-            Hypothetical Document:"""
+            Hypothetical Document:""",
         )
-        
-        # Create chain that extracts content from AIMessage
-        hyde_chain = (hyde_prompt | llm | (lambda x: x.content))
-        
-        hyde_embeddings = HypotheticalDocumentEmbedder(
-            llm_chain=hyde_chain, 
-            base_embeddings=embeddings
-        )
-        vectorstore = Chroma(
-            collection_name=st.session_state.collection_name,
-            embedding_function=hyde_embeddings,
-            persist_directory=persist_directory,
-            create_collection_if_not_exists=True
-        )
-        
-        # Store the hyde_chain in session state for later inspection
+        hyde_chain = hyde_prompt | llm | extract_content
         st.session_state.hyde_chain = hyde_chain
+        embedding = HyDEEmbeddings(hyde_chain, base_embeddings)
     else:
-        embeddings = get_embeddings(api_key=api_key, provider=provider)
-        vectorstore = Chroma(
-            collection_name=st.session_state.collection_name,
-            embedding_function=embeddings,
-            persist_directory=persist_directory,
-            create_collection_if_not_exists=True
-        )
-    
-    # Generate UUIDs for all documents
+        embedding = base_embeddings
+
+    # Vector dimension comes from the base (document) embeddings.
+    dim = len(base_embeddings.embed_query("dimension probe"))
+
+    if "collection_name" not in st.session_state:
+        st.session_state.collection_name = f"rag_collection_{uuid4()}"
+    collection_name = st.session_state.collection_name
+
+    # Fresh in-memory client + dense collection.
+    client = QdrantClient(":memory:")
+    client.create_collection(
+        collection_name=collection_name,
+        vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+    )
+
+    vectorstore = QdrantVectorStore(
+        client=client,
+        collection_name=collection_name,
+        embedding=embedding,
+    )
+
+    # Tag every chunk with a stable id (used by the embedding visualization).
     uuids = [str(uuid4()) for _ in range(len(splits))]
-    
-    # Add unique_id to each document's metadata
-    for split, uuid in zip(splits, uuids):
-        if not hasattr(split, 'metadata'):
+    for split, uid in zip(splits, uuids):
+        if not getattr(split, "metadata", None):
             split.metadata = {}
-        split.metadata['unique_id'] = uuid
+        split.metadata["unique_id"] = uid
 
     for i in range(0, len(splits), batch_size):
-        batch = splits[i:i + batch_size]
-        batch_uuids = uuids[i:i + batch_size]
-        vectorstore.add_documents(documents=batch, ids=batch_uuids)
-    
+        vectorstore.add_documents(
+            documents=splits[i:i + batch_size],
+            ids=uuids[i:i + batch_size],
+        )
 
-    
     return vectorstore
 
 
+class ScoredDenseRetriever(BaseRetriever):
+    """Dense Qdrant retriever that records each hit's similarity score in
+    ``metadata['similarity_score']`` so the UI can show *why* a chunk ranked.
+
+    Exposes ``vectorstore`` and ``search_kwargs`` so it stays drop-in compatible
+    with the hybrid/reranker builders that read those attributes.
+    """
+
+    vectorstore: Any
+    search_type: str = "similarity"
+    search_kwargs: Dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> List[Document]:
+        k = self.search_kwargs.get("k", 5)
+        if self.search_type == "mmr":
+            return self.vectorstore.max_marginal_relevance_search(
+                query, k=k, fetch_k=self.search_kwargs.get("fetch_k", 20)
+            )
+        docs = []
+        for doc, score in self.vectorstore.similarity_search_with_score(query, k=k):
+            doc.metadata = {**doc.metadata, "similarity_score": round(float(score), 4)}
+            docs.append(doc)
+        return docs
+
+
 def get_retriever(vectorstore, search_type="similarity", k=5, fetch_k=20):
-    """
-    Get a retriever from the given vector store.
-    
-    :param vectorstore: Chroma vector store
-    :param search_type: Type of search to perform ("similarity" or "mmr")
-    :param k: Number of documents to retrieve
-    :param fetch_k: Number of documents to fetch for MMR
-    :return: Retriever object
-    """
+    """Pure dense-vector retriever over the Qdrant collection (with scores)."""
     search_kwargs = {"k": k}
     if search_type == "mmr":
         search_kwargs["fetch_k"] = fetch_k
-    
-    return vectorstore.as_retriever(
+
+    return ScoredDenseRetriever(
+        vectorstore=vectorstore,
         search_type=search_type,
-        search_kwargs=search_kwargs
+        search_kwargs=search_kwargs,
     )
+
+
+# --- Reranking (custom, langchain-core only — no langchain_classic) -----------
+
+def _build_compressor(reranker_type: str, top_n: int) -> Callable[[List[Document], str], List[Document]]:
+    """Return a ``compress(docs, query) -> docs`` callable for the chosen reranker."""
+    if reranker_type == "cohere":
+        cohere_key = _get_cohere_key()
+        if not cohere_key:
+            raise ValueError(
+                "Cohere reranker needs a COHERE_API_KEY (add it to "
+                ".streamlit/secrets.toml or the environment), or pick the "
+                "'huggingface (BAAI/bge-reranker-base)' reranker instead."
+            )
+        cohere = CohereRerank(
+            model="rerank-english-v3.0",
+            top_n=top_n,
+            cohere_api_key=cohere_key,
+        )
+
+        def _cohere_compress(docs: List[Document], query: str) -> List[Document]:
+            reranked = list(cohere.compress_documents(docs, query))
+            for d in reranked:  # surface Cohere's relevance score uniformly
+                if "relevance_score" in d.metadata:
+                    d.metadata["rerank_score"] = round(float(d.metadata["relevance_score"]), 4)
+            return reranked
+
+        return _cohere_compress
+
+    elif reranker_type == "huggingface (BAAI/bge-reranker-base)":
+        model = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
+
+        def _hf_compress(docs: List[Document], query: str) -> List[Document]:
+            if not docs:
+                return docs
+            scores = model.score([(query, d.page_content) for d in docs])
+            ranked = sorted(zip(docs, scores), key=lambda pair: pair[1], reverse=True)
+            out = []
+            for doc, score in ranked[:top_n]:
+                doc.metadata = {**doc.metadata, "rerank_score": round(float(score), 4)}
+                out.append(doc)
+            return out
+
+        return _hf_compress
+
+    raise ValueError("Invalid reranker type. Choose 'cohere' or 'huggingface (BAAI/bge-reranker-base)'.")
+
+
+class RerankingRetriever(BaseRetriever):
+    """Wraps a base retriever and reranks its hits with a cross-encoder/Cohere."""
+
+    base_retriever: BaseRetriever
+    compress: Callable[[List[Document], str], List[Document]]
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> List[Document]:
+        docs = self.base_retriever.invoke(query)
+        return list(self.compress(docs, query))
+
 
 def get_reranker_retriever(base_retriever, reranker_type="cohere", top_n=3):
-    if reranker_type == "huggingface (BAAI/bge-reranker-base)":
-        model = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
-        compressor = CrossEncoderReranker(model=model, top_n=top_n)
-    elif reranker_type == "cohere":
-        compressor = CohereRerank(model="rerank-english-v3.0", top_n=top_n,cohere_api_key=st.secrets['COHERE_API_KEY'])
-    else:
-        raise ValueError("Invalid reranker type. Choose 'cohere' or 'huggingface (BAAI/bge-reranker-base)'.")
-    
-    return ContextualCompressionRetriever(base_compressor=compressor, base_retriever=base_retriever)
+    return RerankingRetriever(
+        base_retriever=base_retriever,
+        compress=_build_compressor(reranker_type, top_n),
+    )
+
+
+# --- Hybrid retrieval (explicit BM25 + dense, weighted RRF fusion) ------------
+
+class WeightedEnsembleRetriever(BaseRetriever):
+    """Reciprocal-rank-fusion ensemble of retrievers with per-retriever weights.
+
+    This is the transparent, teachable form of hybrid search: the lexical
+    (BM25) and dense (vector) retrievers each return a ranked list, and we fuse
+    them with weighted RRF: ``score(d) = Σ_i weight_i / (c + rank_i(d))``.
+    """
+
+    retrievers: List[BaseRetriever]
+    weights: List[float]
+    k: int = 5
+    c: int = 60  # RRF dampening constant
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> List[Document]:
+        scores: Dict[str, float] = {}
+        doc_map: Dict[str, Document] = {}
+        for retriever, weight in zip(self.retrievers, self.weights):
+            docs = retriever.invoke(query)
+            for rank, doc in enumerate(docs):
+                key = doc.metadata.get("unique_id") or doc.page_content
+                doc_map[key] = doc
+                scores[key] = scores.get(key, 0.0) + weight * (1.0 / (self.c + rank + 1))
+        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        out = []
+        for key, score in ranked[:self.k]:
+            doc = doc_map[key]
+            doc.metadata = {**doc.metadata, "fusion_score": round(float(score), 4)}
+            out.append(doc)
+        return out
+
 
 def get_hybrid_retriever(splits, vector_retriever, bm25_weight=0.5, vector_weight=0.5):
+    """Hybrid retriever: BM25 (lexical) + dense vector, fused via weighted RRF."""
+    k = vector_retriever.search_kwargs.get("k", 5)
     bm25_retriever = BM25Retriever.from_documents(splits)
-    bm25_retriever.k = vector_retriever.search_kwargs["k"]
-    
-    return EnsembleRetriever(
+    bm25_retriever.k = k
+
+    return WeightedEnsembleRetriever(
         retrievers=[bm25_retriever, vector_retriever],
-        weights=[bm25_weight, vector_weight]
+        weights=[bm25_weight, vector_weight],
+        k=k,
     )
+
 
 def get_hybrid_reranker_retriever(splits, vector_retriever, bm25_weight=0.5, vector_weight=0.5, reranker_type="cohere", top_n=3):
     hybrid_retriever = get_hybrid_retriever(splits, vector_retriever, bm25_weight, vector_weight)
-    
-    if reranker_type == "huggingface (BAAI/bge-reranker-base)":
-        model = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
-        compressor = CrossEncoderReranker(model=model, top_n=top_n)
-    elif reranker_type == "cohere":
-        compressor = CohereRerank(model="rerank-english-v3.0", top_n=top_n,cohere_api_key=st.secrets['COHERE_API_KEY'])
-    else:
-        raise ValueError("Invalid reranker type. Choose 'cohere' or 'huggingface (BAAI/bge-reranker-base)'.")
-    
-    return ContextualCompressionRetriever(base_compressor=compressor, base_retriever=hybrid_retriever)
+    return RerankingRetriever(
+        base_retriever=hybrid_retriever,
+        compress=_build_compressor(reranker_type, top_n),
+    )
+
 
 def retrieve_documents(retriever, query):
-    """
-    Retrieve documents using the given retriever and query.
-    
-    :param retriever: Retriever object
-    :param query: Query string
-    :return: List of retrieved documents
-    """
+    """Retrieve documents using the given retriever and query."""
     return retriever.invoke(query)
+
+
+def _scroll_all_points(client: QdrantClient, collection_name: str):
+    """Fetch every point (payload + vectors) from a (small, in-memory) collection."""
+    points, offset = [], None
+    while True:
+        batch, offset = client.scroll(
+            collection_name=collection_name,
+            with_payload=True,
+            with_vectors=True,
+            limit=256,
+            offset=offset,
+        )
+        points.extend(batch)
+        if offset is None:
+            break
+    return points
 
 
 def create_embedding_visualization(vectorstore, docs_processed: List[Document], query: str, retrieved_docs: Dict[str, List[Document]], method='pacmap', sample_size=None, dimensions=2, use_random_state=True, selected_retrievers=None, api_key=None):
     """
     Create a visualization of document embeddings and retrieved documents.
-    
-    :param vectorstore: The Chroma vector store containing document embeddings
+
+    :param vectorstore: The Qdrant vector store containing document embeddings
     :param docs_processed: List of all processed documents
     :param query: The user query
     :param retrieved_docs: Dictionary of retrieved documents for each retriever
@@ -205,17 +370,25 @@ def create_embedding_visualization(vectorstore, docs_processed: List[Document], 
     :param api_key: API key (required for OpenAI)
     :return: Plotly figure object
     """
-    provider = st.session_state.get("llm_provider", "OpenAI")
-    
+    provider = st.session_state.get("llm_provider", "Google Gemini")
+
     # Only require API key for OpenAI
     if provider == "OpenAI" and not api_key:
         raise ValueError("OpenAI API Key is required. Please provide it in the sidebar.")
-    
-    # Retrieve embeddings and metadata
-    result = vectorstore.get(include=["embeddings", "metadatas", "documents"])
-    embeddings = result["embeddings"]
-    metadatas = result["metadatas"]
-    documents = result["documents"]
+
+    # Pull all stored points (vectors + payload) from Qdrant.
+    points = _scroll_all_points(vectorstore.client, vectorstore.collection_name)
+    embeddings: List[List[float]] = []
+    metadatas: List[Dict[str, Any]] = []
+    documents: List[str] = []
+    for point in points:
+        vector = point.vector
+        if isinstance(vector, dict):  # named vectors -> take the first one
+            vector = next(iter(vector.values()))
+        payload = point.payload or {}
+        embeddings.append(vector)
+        metadatas.append(payload.get("metadata", {}) or {})
+        documents.append(payload.get("page_content", "") or "")
 
     # Sample if necessary
     if sample_size and len(embeddings) > sample_size:
@@ -298,17 +471,17 @@ def create_embedding_visualization(vectorstore, docs_processed: List[Document], 
             subset = df[df['retriever'] == "Query"]
         else:
             subset = df[df['retriever'].apply(lambda x: retriever in x)]
-        
+
         marker_size = 30 if retriever == "Query" else (10 if retriever == "Not retrieved" else 15)
         symbol = "diamond-open" if retriever == "Query" else "circle"
-        
+
         if dimensions == 2:
             fig.add_trace(go.Scatter(
                 x=subset['x'], y=subset['y'],
                 mode='markers',
                 marker=dict(size=marker_size, symbol=symbol),
                 name=retriever,
-                text=[f"Rank: {rank}<br>Cosine Similarity: {sim:.3f}<br>Source: {source}<br>Extract: {extract}" 
+                text=[f"Rank: {rank}<br>Cosine Similarity: {sim:.3f}<br>Source: {source}<br>Extract: {extract}"
                       for rank, sim, source, extract in zip(subset['rank'], subset['cosine_similarity'], subset['source'], subset['extract'])],
                 hoverinfo="text+name"
             ))
@@ -318,7 +491,7 @@ def create_embedding_visualization(vectorstore, docs_processed: List[Document], 
                 mode='markers',
                 marker=dict(size=marker_size, symbol=symbol),
                 name=retriever,
-                text=[f"Rank: {rank}<br>Cosine Similarity: {sim:.3f}<br>Source: {source}<br>Extract: {extract}" 
+                text=[f"Rank: {rank}<br>Cosine Similarity: {sim:.3f}<br>Source: {source}<br>Extract: {extract}"
                       for rank, sim, source, extract in zip(subset['rank'], subset['cosine_similarity'], subset['source'], subset['extract'])],
                 hoverinfo="text+name"
             ))
@@ -344,15 +517,16 @@ def create_embedding_visualization(vectorstore, docs_processed: List[Document], 
 
     return fig
 
+
 # Add new function to display HYDE generations
 def display_hyde_generations(query: str, return_doc: bool = False) -> Optional[str]:
     """
     Generate and display HYDE document for a query.
-    
+
     Args:
         query (str): The query to generate a hypothetical document for
         return_doc (bool): Whether to return the generated document
-        
+
     Returns:
         Optional[str]: The generated document if return_doc is True, None otherwise
     """
@@ -360,17 +534,18 @@ def display_hyde_generations(query: str, return_doc: bool = False) -> Optional[s
         # Generate hypothetical document and extract content from AIMessage
         hyde_response = st.session_state.hyde_chain.invoke({"question": query})
         hyde_doc = hyde_response.content if hasattr(hyde_response, 'content') else str(hyde_response)
-        
+
         with st.expander("View HYDE Generated Document"):
             st.markdown("### Hypothetical Document")
             st.write(hyde_doc)
-            
+
             # Add some analysis
             st.markdown("### Document Analysis")
             st.markdown(f"- Document length: {len(hyde_doc)} characters")
             st.markdown(f"- Word count: {len(hyde_doc.split())}")
-            
-            # You could add more analysis here (e.g., key terms, sentiment, etc.)
-            
+
+        if return_doc:
+            return hyde_doc
+
     except Exception as e:
         st.error(f"Error generating HYDE document: {str(e)}")

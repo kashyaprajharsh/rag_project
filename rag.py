@@ -1,16 +1,50 @@
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel
-from langchain_openai import ChatOpenAI
+from langchain.chat_models import init_chat_model
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains import LLMChain
-from langchain.schema import StrOutputParser
 import time
+
+# Default model per canonical provider; any model_name can be passed to get_llm().
+DEFAULT_MODELS = {
+    "google_genai": "gemini-3.1-flash-lite",
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-3-5-sonnet-latest",
+}
+
+
+def _canonical_provider(provider: str) -> str:
+    """Map the app's display names to LangChain provider ids."""
+    p = (provider or "").strip().lower()
+    if p in ("openai", "gpt"):
+        return "openai"
+    if p in ("anthropic", "claude"):
+        return "anthropic"
+    return "google_genai"  # default: Google Gemini
 from langchain_community.callbacks.manager import get_openai_callback
 import streamlit as st
 
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
+
+
+def extract_content(response) -> str:
+    """Flatten a chat-model response to plain text.
+
+    Gemini (and other reasoning models) may return ``content`` as a list of
+    blocks like ``[{"type": "text", "text": "..."}, {...thinking...}]`` instead
+    of a string. Pull out just the text. Also accepts a raw string/list.
+    """
+    content = getattr(response, "content", response)
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "".join(parts)
+    return content or ""
 
 
 template = """Based on the following context, answer the question: {question}            
@@ -42,21 +76,45 @@ def create_rag_chain(retriever, llm):
         RunnablePassthrough.assign(context=(lambda x: format_docs(x["context"])))
         | custom_rag_prompt
         | llm
-        | StrOutputParser()
+        | extract_content  # robust to Gemini list-style content blocks
     )
 
     return RunnableParallel(
         {"context": retriever, "question": RunnablePassthrough()}
     ).assign(answer=rag_chain_from_docs)
 
-def get_llm(model_name="gpt-4o-mini", api_key=None,provider="Google Gemini"):
-    """Get LLM based on provider"""
-    if provider == "OpenAI":
+def get_llm(model_name=None, api_key=None, provider="Google Gemini", temperature=0.1):
+    """Initialize a chat model via LangChain's ``init_chat_model``.
+
+    Any model can be passed; ``provider`` accepts the app's display names
+    ('OpenAI', 'Google Gemini') or canonical ids ('openai', 'google_genai',
+    'anthropic'). If ``model_name`` is omitted, a sensible per-provider default
+    is used. Mirrors the multi-provider pattern in the antarman project.
+    """
+    prov = _canonical_provider(provider)
+    # Fall back to the model the user typed in the sidebar, then the provider default.
+    if model_name is None:
+        try:
+            model_name = st.session_state.get("model_name")
+        except Exception:
+            model_name = None
+    model = model_name or DEFAULT_MODELS[prov]
+
+    if prov == "openai":
         if not api_key:
             raise ValueError("OpenAI API Key is required for OpenAI models. Please provide it in the sidebar.")
-        return ChatOpenAI(model_name=model_name, temperature=0.1, openai_api_key=api_key)
-    else:  # Google Gemini
-        return ChatGoogleGenerativeAI(model="gemini-2.0-flash-exp", temperature=0.1)
+        return init_chat_model(model, model_provider="openai", temperature=temperature, api_key=api_key)
+
+    if prov == "google_genai":
+        # Use ChatGoogleGenerativeAI directly — init_chat_model doesn't pass
+        # Gemini streaming params through cleanly (per antarman's llm.py).
+        gemini_kwargs = {"model": model, "temperature": temperature}
+        if api_key:
+            gemini_kwargs["google_api_key"] = api_key
+        return ChatGoogleGenerativeAI(**gemini_kwargs)
+
+    # anthropic / any other init_chat_model-supported provider
+    return init_chat_model(model, model_provider=prov, temperature=temperature)
 
 RAG_TYPES = {
     "Vector Store Retriever": "base_retriever",
@@ -66,7 +124,7 @@ RAG_TYPES = {
 }
 
 def generate_rag_answer(prompt, retriever, rag_type, api_key):
-    provider = st.session_state.get("llm_provider", "OpenAI")
+    provider = st.session_state.get("llm_provider", "Google Gemini")
     llm = get_llm(api_key=api_key, provider=provider)
     chain = create_rag_chain(retriever, llm)
     question = prompt['question'] if isinstance(prompt, dict) else prompt

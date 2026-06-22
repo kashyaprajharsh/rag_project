@@ -1,5 +1,6 @@
-from langchain_community.document_loaders import PyPDFLoader, OnlinePDFLoader
-from langchain.text_splitter import CharacterTextSplitter, RecursiveCharacterTextSplitter, TokenTextSplitter
+from liteparse import LiteParse
+from langchain_core.documents import Document
+from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter, TokenTextSplitter
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -14,50 +15,73 @@ from vectordb import get_embeddings
 
 
 def load_pdf_data(pdf_sources, method='normal'):
+    """Load PDFs with LiteParse v2, returning Markdown-rendered LangChain Documents.
+
+    Replaces the previous PyPDF / unstructured loaders. Each page becomes a
+    Document whose ``page_content`` is LiteParse's Markdown rendering (headings,
+    tables, lists, and links are preserved), giving cleaner chunks for the RAG
+    pipeline. Header/footer dict markers are kept unchanged so the existing
+    ``display_pdf_content`` and ``split_text`` consumers keep working.
+
+    method:
+        'normal'      -> image placeholders are stripped from the Markdown.
+        'with_images' -> image references are kept inline in the Markdown.
+    LiteParse runs OCR automatically on scanned/image pages in both modes.
+    """
+    # Map the legacy loading_method to LiteParse's image handling.
+    image_mode = 'placeholder' if method == 'with_images' else 'off'
+    parser = LiteParse(
+        output_format='markdown',
+        image_mode=image_mode,
+        extract_links=True,
+    )
+
     all_data = []
     for pdf_source in pdf_sources:
         try:
             if pdf_source.startswith('http'):
-                # For online PDFs, download first then use PyPDFLoader
+                # LiteParse parses raw bytes directly, so no temp file is needed.
                 response = requests.get(pdf_source)
                 response.raise_for_status()  # Raise an error for bad responses
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-                    tmp_file.write(response.content)
-                    tmp_file_path = tmp_file.name
-
-                loader = PyPDFLoader(tmp_file_path, extract_images=(method == 'with_images'))
+                parse_input = response.content
                 pdf_name = pdf_source.split('/')[-1]  # Extract filename from URL
 
             else:
                 # For local files
                 if not os.path.exists(pdf_source):
                     raise FileNotFoundError(f"The file {pdf_source} does not exist.")
-                
-                loader = PyPDFLoader(pdf_source, extract_images=(method == 'with_images'))
+
+                parse_input = pdf_source
                 pdf_name = os.path.basename(pdf_source)
 
-            data = loader.load()
-            
+            result = parser.parse(parse_input)
+
             # Add a header document for each PDF
             header_doc = {
                 "page_content": f"--- Start of PDF: {pdf_name} ---",
                 "metadata": {"source": pdf_source, "page": 0}
             }
             all_data.append(header_doc)
-            
-            # Add the actual PDF data
-            all_data.extend(data)
-            
+
+            # One Document per page, carrying page geometry for visual citations.
+            for page in result.pages:
+                all_data.append(Document(
+                    page_content=page.text or "",
+                    metadata={
+                        "source": pdf_source,
+                        "pdf_name": pdf_name,
+                        "page": page.page_num,
+                        "width": page.width,
+                        "height": page.height,
+                    },
+                ))
+
             # Add a footer document for each PDF
             footer_doc = {
                 "page_content": f"--- End of PDF: {pdf_name} ---",
-                "metadata": {"source": pdf_source, "page": len(data) + 1}
+                "metadata": {"source": pdf_source, "page": len(result.pages) + 1}
             }
             all_data.append(footer_doc)
-
-            # Clean up temporary file if it was created
-            if pdf_source.startswith('http'):
-                os.remove(tmp_file_path)
 
         except requests.RequestException as e:
             raise Exception(f"Error downloading the PDF {pdf_source}: {str(e)}")

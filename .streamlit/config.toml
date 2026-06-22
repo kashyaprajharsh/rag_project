@@ -1,3 +1,9 @@
+[server]
+# transformers/sentence-transformers expose lazy submodules that crash
+# Streamlit's source watcher during introspection. Disable file watching to
+# silence those noisy (non-fatal) tracebacks.
+fileWatcherType = "none"
+
 [theme]
 primaryColor="#10789c"
 backgroundColor="#00000e"

@@ -1,16 +1,13 @@
 import os
 from typing import List, Dict, Literal
-from cohere import SystemMessage
-from sympy import assuming
 from typing_extensions import TypedDict
 from pydantic import BaseModel, Field
 from typing import Literal
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain.schema import Document
+from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain.chains import LLMChain
+from langchain_tavily import TavilySearch
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph, START
 from IPython.display import Image, display
@@ -36,11 +33,27 @@ from rag import (
     custom_rag_prompt
 )
 
-# Set environment variables
-os.environ['TAVILY_API_KEY'] = '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'
+# TAVILY_API_KEY must be supplied via the environment or .streamlit/secrets.toml.
+# Never hardcode it — this file is committed to a public repo.
+if not os.getenv("TAVILY_API_KEY"):
+    try:
+        if "TAVILY_API_KEY" in st.secrets:
+            os.environ["TAVILY_API_KEY"] = st.secrets["TAVILY_API_KEY"]
+    except Exception:
+        pass
 tavily_api_key = os.getenv("TAVILY_API_KEY")
 
-web_search_tool = TavilySearchResults(k=5)
+# Construct the Tavily tool lazily — instantiating it eagerly requires
+# TAVILY_API_KEY at import time, which would break the whole app when the key
+# isn't set (web search is optional).
+_web_search_tool = None
+
+
+def get_web_search_tool():
+    global _web_search_tool
+    if _web_search_tool is None:
+        _web_search_tool = TavilySearch(max_results=5)
+    return _web_search_tool
 
 # Data model
 class RouteQuery(BaseModel):
@@ -153,6 +166,15 @@ doc_grader_prompt = "Here is the retrieved document: \n\n {document} \n\n Here i
 
 
 
+def _is_yes(value) -> bool:
+    """Normalize a grader's binary score across providers/prompt wording.
+
+    The grader prompts variously ask for 'yes'/'no' or score 1/0, and different
+    models capitalize differently (Gemini tends to return 'Yes'). Treat any of
+    yes/true/1 as affirmative."""
+    return str(value).strip().lower() in ("yes", "true", "1")
+
+
 ### Nodes
 def retrieve(state):
     """
@@ -225,9 +247,9 @@ def grade_documents(state):
         
         grade = score.binary_score  # This is where the error occurs
         print(f"\nExtracted grade: {grade}")
-        
+
         # Document relevant
-        if grade.lower() == "yes":
+        if _is_yes(grade):
             print("---GRADE: DOCUMENT RELEVANT---")
             filtered_docs.append(d)
         # Document not relevant
@@ -268,9 +290,10 @@ def web_search(state):
     question = state["question"]
     documents = state.get("documents", [])
 
-    # Web search
-    docs = web_search_tool.invoke({"query": question})
-    web_results = "\n".join([d["content"] for d in docs])
+    # Web search (langchain-tavily returns {"results": [{"content": ...}, ...]})
+    response = get_web_search_tool().invoke({"query": question})
+    results = response.get("results", []) if isinstance(response, dict) else response
+    web_results = "\n".join([r.get("content", "") for r in results])
     web_results = Document(page_content=web_results)
     documents.append(web_results)
     return {"documents": documents}
@@ -349,7 +372,7 @@ def grade_generation_v_documents_and_question(state):
     grade = score.binary_score
 
     # Check hallucination
-    if grade == "yes":
+    if _is_yes(grade):
         print("---DECISION: GENERATION IS GROUNDED IN DOCUMENTS---")
         print("---GRADE GENERATION vs QUESTION---")
         
@@ -368,7 +391,7 @@ def grade_generation_v_documents_and_question(state):
         ])
         
         grade = score.binary_score
-        if grade == "yes":
+        if _is_yes(grade):
             print("---DECISION: GENERATION ADDRESSES QUESTION---")
             return "useful"
         elif state["loop_step"] <= max_retries:
