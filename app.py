@@ -19,7 +19,7 @@ from vectordb import (
     create_embedding_visualization,
     display_hyde_generations,
 )
-from rag import generate_all_rag_answers, RAG_TYPES, get_llm
+from rag import generate_all_rag_answers, RAG_TYPES, get_llm, extract_content
 from agentic_rag import initialize_components, run_rag_bot_stream
 from rag_fusion import (
     generate_fusion_queries,
@@ -27,6 +27,7 @@ from rag_fusion import (
     create_fusion_visualization,
     get_fusion_chain
 )
+from citations import highlight_chunk
 
 from streamlit_option_menu import option_menu
 from functools import partial
@@ -38,6 +39,7 @@ import validators
 from typing import Any, List, Dict
 from itertools import combinations
 import difflib
+import html
 import base64
 import requests
 import tempfile
@@ -155,15 +157,140 @@ def display_pdf_content(data: List[Any]) -> None:
             if "images" in page.metadata:
                 for j, img_data in enumerate(page.metadata["images"]):
                     img = Image.open(io.BytesIO(img_data))
-                    st.image(img, caption=f"Image {j+1}", use_container_width=True)
+                    st.image(img, caption=f"Image {j+1}", width='stretch')
+
+# Cache visual citations so toggling/reruns don't re-parse the PDF each time.
+@st.cache_data(show_spinner=False)
+def _cached_highlight_chunk(source: str, page: Any, chunk_text: str) -> Dict[int, bytes]:
+    return highlight_chunk(source, chunk_text, page=page)
+
+
+def render_source_citation(doc: Any, key: str) -> None:
+    """Show where a retrieved chunk lives in its source PDF, with the matching
+    region(s) highlighted on the rendered page."""
+    source = doc.metadata.get("source")
+    page = doc.metadata.get("page")
+    if not source:
+        st.caption("ℹ️ No source PDF recorded for this chunk.")
+        return
+
+    if not st.toggle("🔦 Show source location in PDF", key=f"cite_toggle_{key}"):
+        return
+
+    with st.spinner("Locating chunk in source PDF..."):
+        try:
+            images = _cached_highlight_chunk(str(source), page, doc.page_content)
+        except Exception as e:
+            st.warning(f"Could not render source citation: {e}")
+            return
+
+    if not images:
+        st.info(
+            "Couldn't locate this chunk's exact text on the page — it may have "
+            "been reformatted during splitting or come from an image/table."
+        )
+        return
+
+    for page_num in sorted(images):
+        st.image(
+            images[page_num],
+            caption=f"{os.path.basename(str(source))} — page {page_num}",
+            width='stretch',
+        )
+
+
+# Score keys stamped by the retrievers, with friendly labels (Feature 1).
+_SCORE_LABELS = {
+    "rerank_score": "Rerank score",
+    "fusion_score": "Hybrid (RRF) score",
+    "similarity_score": "Similarity score",
+}
+
+
+def _doc_score_badge(doc: Any) -> None:
+    """Show whichever retrieval score the retriever recorded for this chunk."""
+    for key, label in _SCORE_LABELS.items():
+        if key in doc.metadata and doc.metadata[key] is not None:
+            st.caption(f"📊 **{label}:** `{doc.metadata[key]}`")
+            return
+
 
 # Display Retrieved Documents
 def display_retrieved_docs(docs: List[Any], retriever_name: str) -> None:
     for i, doc in enumerate(docs):
-        with st.expander(f"{retriever_name} - Document {i+1}"):
+        score_hint = next(
+            (f" · {_SCORE_LABELS[k]} {doc.metadata[k]}" for k in _SCORE_LABELS if doc.metadata.get(k) is not None),
+            "",
+        )
+        with st.expander(f"{retriever_name} - Document {i+1}{score_hint}"):
+            _doc_score_badge(doc)
             st.markdown(f"**Content:**\n{doc.page_content}")
             st.markdown("**Metadata:**")
             st.json(doc.metadata)
+            render_source_citation(doc, key=f"{retriever_name}_{i}")
+
+def render_retriever_showdown(query: str) -> None:
+    """Feature: run one query through all four retriever strategies and show,
+    for each retrieved chunk, its rank under each strategy — so users can see
+    how reranking and hybrid search reshuffle results."""
+    vectorstore = st.session_state.get("vectorstore")
+    if not vectorstore or not query.strip():
+        st.info("Create a vector store and run a query above first.")
+        return
+
+    splitter = st.session_state.get("vectorstore_splitter", st.session_state.get("recommended_splitter"))
+    splits = st.session_state.get("split_results", {}).get(splitter, [])
+    k = st.session_state.get("retriever_k", 5)
+    search_type = st.session_state.get("retriever_search_type", "similarity")
+    reranker_type = st.session_state.get("showdown_reranker", "cohere")
+
+    base = get_retriever(vectorstore, search_type, k)
+    builders = {
+        "Vector": lambda: base,
+        "Vector+Rerank": lambda: get_reranker_retriever(base, reranker_type, top_n=k),
+        "Hybrid": lambda: get_hybrid_retriever(splits, base, 0.5, 0.5),
+        "Hybrid+Rerank": lambda: get_hybrid_reranker_retriever(splits, base, 0.5, 0.5, reranker_type, top_n=k),
+    }
+
+    results: Dict[str, List[Any]] = {}
+    for name, build in builders.items():
+        try:
+            results[name] = build().invoke(query)
+        except Exception as e:
+            st.warning(f"'{name}' retriever failed: {e}")
+
+    if not results:
+        return
+
+    # unique_id -> readable label
+    labels: Dict[str, str] = {}
+    for docs in results.values():
+        for doc in docs:
+            uid = doc.metadata.get("unique_id") or doc.page_content[:40]
+            if uid not in labels:
+                src = str(doc.metadata.get("source", "?")).split("/")[-1]
+                page = doc.metadata.get("page", "?")
+                labels[uid] = f"{src} p{page}: {doc.page_content[:50].strip()}…"
+
+    rows = []
+    for uid, label in labels.items():
+        row = {"Chunk": label}
+        for name, docs in results.items():
+            ids = [d.metadata.get("unique_id") or d.page_content[:40] for d in docs]
+            row[name] = (ids.index(uid) + 1) if uid in ids else None
+        rows.append(row)
+
+    df = pd.DataFrame(rows).sort_values(
+        by=list(results.keys()), key=lambda col: col.fillna(999), kind="stable"
+    )
+    st.caption("Cell = the chunk's **rank** under that retriever (blank = not retrieved). Lower is better.")
+    st.dataframe(
+        df.style.format({n: lambda v: "" if pd.isna(v) else f"#{int(v)}" for n in results.keys()}),
+        width='stretch',
+    )
+    everywhere = sum(1 for r in rows if all(r.get(n) is not None for n in results.keys()))
+    st.caption(f"📌 {everywhere} chunk(s) retrieved by **all** strategies · {len(rows)} unique chunk(s) total.")
+
 
 # Display RAG Results
 def display_rag_results(results: Dict[str, Any], question_number: int) -> None:
@@ -174,6 +301,17 @@ def display_rag_results(results: Dict[str, Any], question_number: int) -> None:
         with rag_tab:
             st.markdown("### Answer")
             st.write(result["output"])
+
+            # Feature: answer → source. Show the exact chunks that grounded this
+            # answer, each with the PDF visual-citation highlighter.
+            context_docs = result.get("context") or []
+            if context_docs:
+                with st.expander(f"📄 Sources for this answer ({len(context_docs)} chunks)"):
+                    for j, doc in enumerate(context_docs):
+                        _doc_score_badge(doc)
+                        st.markdown(doc.page_content)
+                        render_source_citation(doc, key=f"ragsrc_{question_number}_{rag_type}_{j}")
+                        st.markdown("---")
 
             if st.button(
                 f"Show Chain Visualization for {rag_type}",
@@ -255,6 +393,62 @@ def visualize_rag_chain(chain_data: Dict[str, Any]) -> None:
             st.markdown("---")
 
 # Display Splitting Results
+def _longest_overlap(a: str, b: str, max_check: int = 800) -> int:
+    """Length of the longest suffix of ``a`` that is also a prefix of ``b``.
+
+    Used to detect the overlapping region between two consecutive chunks so we
+    can highlight exactly which text a splitter repeats across chunk boundaries.
+    """
+    a_tail = a[-max_check:]
+    upper = min(len(a_tail), len(b))
+    for length in range(upper, 0, -1):
+        if a_tail[-length:] == b[:length]:
+            return length
+    return 0
+
+
+# Distinct, dark-theme-friendly backgrounds cycled per chunk.
+_CHUNK_COLORS = ["#1f3a5f", "#3d2f5c", "#1f5147", "#5c3a1f", "#4a1f3d", "#2f4a1f"]
+_OVERLAP_COLOR = "#b58900"  # amber: the text a chunk shares with the next one
+
+
+def render_chunk_highlighter(splits: List[Any], max_chunks: int = 12) -> str:
+    """Render chunks as alternating colored blocks, with the overlap that bleeds
+    into the next chunk highlighted in amber — so users can *see* chunk size and
+    chunk-overlap at work for the chosen splitter."""
+    # Escape, then turn real newlines into <br> so the whole thing stays on one
+    # logical line — otherwise Streamlit's Markdown pass treats the PDF's
+    # leading-indented lines as code blocks and the HTML renders as raw text.
+    def esc(s: str) -> str:
+        return html.escape(s).replace("\n", "<br>")
+
+    texts = [c.page_content for c in splits[:max_chunks]]
+    blocks = []
+    for i, text in enumerate(texts):
+        color = _CHUNK_COLORS[i % len(_CHUNK_COLORS)]
+        overlap_len = _longest_overlap(text, texts[i + 1]) if i + 1 < len(texts) else 0
+        body = text[:len(text) - overlap_len] if overlap_len else text
+        overlap = text[len(text) - overlap_len:] if overlap_len else ""
+
+        inner = (
+            f'<span style="opacity:0.65;font-size:0.8em;">&#9656; Chunk {i + 1} '
+            f'&middot; {len(text)} chars &middot; {len(text.split())} words</span><br>'
+            f'{esc(body)}'
+        )
+        if overlap:
+            inner += (
+                f'<span style="background:{_OVERLAP_COLOR};color:#000;border-radius:3px;" '
+                f'title="overlap shared with Chunk {i + 2} ({overlap_len} chars)">'
+                f'{esc(overlap)}</span>'
+            )
+        blocks.append(
+            f'<div style="background:{color};color:#eaeaea;padding:10px 12px;'
+            f'margin:6px 0;border-radius:6px;word-wrap:break-word;'
+            f'font-family:monospace;font-size:0.85em;line-height:1.4;">{inner}</div>'
+        )
+    return "".join(blocks)
+
+
 def display_splitting_results(results: Dict[str, Any]) -> None:
     # Store results in session state
     st.session_state.splitting_results = results
@@ -329,6 +523,32 @@ def display_splitting_results(results: Dict[str, Any]) -> None:
             st.success(
                 f"Based on {metric}, the recommended splitter is: **{recommended_splitter}**"
             )
+
+    # Visual chunk boundary + overlap highlighter
+    st.subheader("🎨 Chunk Boundary & Overlap Highlighter")
+    st.caption(
+        "See how the splitter chops the document. Each block is one chunk; the "
+        "**amber** text is the overlap shared with the *next* chunk (i.e. your "
+        "chunk-overlap setting in action)."
+    )
+    hl_cols = st.columns([2, 1])
+    with hl_cols[0]:
+        hl_splitter = st.selectbox(
+            "Splitter to visualize:",
+            list(results.keys()),
+            key="chunk_highlight_splitter",
+        )
+    with hl_cols[1]:
+        n_available = len(results[hl_splitter]['splits'])
+        hl_max = max(3, min(20, n_available))
+        hl_count = st.slider(
+            "Chunks to show:", 2, hl_max, min(8, hl_max),
+            key="chunk_highlight_count",
+        )
+    st.markdown(
+        render_chunk_highlighter(results[hl_splitter]['splits'], max_chunks=hl_count),
+        unsafe_allow_html=True,
+    )
 
     # Add chunk comparison section
     st.subheader("Chunk Comparison")
@@ -756,7 +976,7 @@ def text_splitting_page() -> None:
         "Character": "Splits text based on a fixed number of characters. Simple but may break words.",
         "Recursive": "Intelligently splits text into chunks, trying to keep sentences and paragraphs intact.",
         "Token": "Splits text based on the number of tokens (words or subwords). Useful for maintaining context.",
-        "Semantic": "Uses embeddings to split text based on semantic meaning. Requires OpenAI API key.",
+        "Semantic": "Uses embeddings to split text based on semantic meaning. Requires an API key (OpenAI or Google Gemini).",
     }
 
     # Use session state for splitter selection with previous value
@@ -809,7 +1029,7 @@ def text_splitting_page() -> None:
     if "Semantic" in selected_splitters:
         st.warning("⚠️ The Semantic Splitter may take a considerable amount of time for large PDFs. Please be patient.")
         if not st.session_state.api_key:
-            st.error("❗ OpenAI API Key is required for the Semantic Splitter. Please provide it in the sidebar.")
+            st.error("❗ An API Key is required for the Semantic Splitter. Please provide it in the sidebar.")
             return
         with st.expander("Semantic Splitter Parameters"):
             col1, col2 = st.columns(2)
@@ -847,7 +1067,7 @@ def text_splitting_page() -> None:
     if not st.session_state.get('splitting_results') or selection_changed:
         if st.button("Process PDF", key="process_pdf_button"):
             if "Semantic" in selected_splitters and not st.session_state.api_key:
-                st.error("❗ OpenAI API Key is required for the Semantic Splitter.")
+                st.error("❗ An API Key is required for the Semantic Splitter.")
                 return
             if selected_splitters:
                 with st.spinner("Processing..."):
@@ -934,16 +1154,18 @@ def retriever_page() -> None:
 
     if st.button("Create Vector Store", key="create_vector_store_button"):
         if not st.session_state.api_key:
-            st.error("❗ OpenAI API Key is required to create the Vector Store.")
+            st.error("❗ An API Key is required to create the Vector Store. Please provide it in the sidebar.")
             return
         if selected_splitter not in st.session_state.split_results:
             st.error(f"❗ Splitter '{selected_splitter}' not found in split results.")
             return
         with st.spinner("Creating Vector Store..."):
             try:
-                splits = st.session_state.split_results[
-                    st.session_state.recommended_splitter
-                ]
+                # Use the splitter the user actually selected above (not just the
+                # recommended one) and remember it so the BM25 hybrid retriever
+                # is built from the same chunks.
+                splits = st.session_state.split_results[selected_splitter]
+                st.session_state.vectorstore_splitter = selected_splitter
                 vectorstore = create_vectorstore(
                     splits=splits,
                     batch_size=batch_size,
@@ -1030,11 +1252,14 @@ def retriever_page() -> None:
                         )
                         st.session_state.reranker_retriever = reranker_retriever
 
+                    # BM25 must index the same chunks the vector store was built from.
+                    hybrid_splitter = st.session_state.get(
+                        "vectorstore_splitter", st.session_state.recommended_splitter
+                    )
+
                     if "Ensemble" in retriever_type:
                         hybrid_retriever = get_hybrid_retriever(
-                            st.session_state.split_results[
-                                st.session_state.recommended_splitter
-                            ],
+                            st.session_state.split_results[hybrid_splitter],
                             base_retriever,
                             bm25_weight,
                             vector_weight,
@@ -1043,9 +1268,7 @@ def retriever_page() -> None:
 
                     if retriever_type == "Ensemble Retriever with Reranker":
                         hybrid_reranker_retriever = get_hybrid_reranker_retriever(
-                            st.session_state.split_results[
-                                st.session_state.recommended_splitter
-                            ],
+                            st.session_state.split_results[hybrid_splitter],
                             base_retriever,
                             bm25_weight,
                             vector_weight,
@@ -1159,6 +1382,17 @@ def retriever_page() -> None:
                     st.info(
                         "No comparison retriever selected. Using Vector Store Retriever only."
                     )
+
+            # Retriever showdown (Feature: compare all strategies on this query)
+            with st.expander("⚔️ Retriever Showdown — compare all strategies on this query"):
+                st.selectbox(
+                    "Reranker to use in the showdown:",
+                    ["cohere", "huggingface (BAAI/bge-reranker-base)"],
+                    key="showdown_reranker",
+                )
+                if st.button("Run showdown", key="run_showdown"):
+                    with st.spinner("Running all retrievers..."):
+                        render_retriever_showdown(st.session_state.get("current_query", ""))
 
             # Embedding visualization section
             st.subheader("Embedding Visualization")
@@ -1275,6 +1509,31 @@ def rag_chain_page() -> None:
 
         st.rerun()
 
+def render_agentic_trace(visited: List[str]) -> None:
+    """Feature: draw the LangGraph workflow with the nodes this query actually
+    visited highlighted, so users see the path the agent took."""
+    nodes = ["transform_query", "retrieve", "grade_documents", "generate", "websearch", "END"]
+    edges = [
+        ("transform_query", "retrieve"), ("transform_query", "websearch"),
+        ("websearch", "generate"), ("retrieve", "grade_documents"),
+        ("grade_documents", "generate"), ("grade_documents", "websearch"),
+        ("generate", "END"), ("generate", "websearch"),
+    ]
+    visited_set = set(visited)
+    dot = Digraph()
+    dot.attr(rankdir="LR")
+    for n in nodes:
+        if n in visited_set:
+            dot.node(n, n, style="filled", fillcolor="#10789c", fontcolor="white")
+        else:
+            dot.node(n, n, color="#888888", fontcolor="#888888")
+    for a, b in edges:
+        active = a in visited_set and b in visited_set
+        dot.edge(a, b, color="#10789c" if active else "#cccccc",
+                 penwidth="2.0" if active else "1.0")
+    st.graphviz_chart(dot)
+
+
 # Add a new page for Agentic RAG
 def agentic_rag_page() -> None:
     st.header("🤖 Agentic RAG")
@@ -1296,16 +1555,10 @@ def agentic_rag_page() -> None:
         st.warning("Please provide your API Key in the sidebar to use Agentic RAG.")
         return
 
-    # Check if using OpenAI
-    if st.session_state.get("llm_provider") != "OpenAI":
-        st.error(
-            """
-            ⚠️ Agentic RAG currently only works with OpenAI models. 
-            Please switch to OpenAI in the sidebar to use this feature.
-            Support for other LLM providers will be added in future updates.
-            """
-        )
-        return
+    st.caption(
+        f"Running the agent with **{st.session_state.get('llm_provider', 'Google Gemini')}**. "
+        "Web search steps require a `TAVILY_API_KEY` (env or secrets)."
+    )
 
     # Add workflow diagram
     st.markdown("""
@@ -1364,10 +1617,11 @@ def agentic_rag_page() -> None:
                     with st.expander("Process Details", expanded=True):
                         process_container = st.empty()
                 
-                # Track the final answer and process details
+                # Track the final answer, process details, and path taken
                 final_answer = ""
                 process_details = []
-                
+                visited_nodes: List[str] = []
+
                 # Process the query and update the UI in real-time
                 for output in run_rag_bot_stream(query, api_key=st.session_state.get("api_key")):
                     if output["type"] == "generation":
@@ -1375,13 +1629,24 @@ def agentic_rag_page() -> None:
                         with answer_container:
                             st.markdown("### Answer")
                             st.markdown(final_answer)
-                    
+
+                    node = output.get("key")
+                    if node and (not visited_nodes or visited_nodes[-1] != node):
+                        visited_nodes.append(node)
+
                     # Update process details
                     process_details.append(f"**{output['key']}**:")
                     process_details.append(f"{str(output['content'])}\n")
                     with process_container:
                         st.markdown("\n".join(process_details))
-                
+
+                # Show the agent's path through the graph
+                if visited_nodes:
+                    with col1:
+                        with st.expander("🧭 Agent path taken", expanded=True):
+                            st.markdown("**Path:** " + " → ".join(visited_nodes) + " → END")
+                            render_agentic_trace(visited_nodes)
+
                 # Add the final answer to chat history
                 if final_answer:
                     st.session_state.agentic_messages.append({
@@ -1493,6 +1758,7 @@ def rag_fusion_page() -> None:
                             st.markdown(doc.page_content)
                             st.markdown("**Metadata:**")
                             st.json(doc.metadata)
+                            render_source_citation(doc, key=f"fusion_{i}")
                             st.markdown("---")
     
     # Chat input
@@ -1538,10 +1804,11 @@ def rag_fusion_page() -> None:
                     Answer:"""
                 )
                 
-                # Add assistant message to chat history
+                # Add assistant message to chat history (extract_content handles
+                # Gemini's list-style content blocks)
                 st.session_state.fusion_messages.append({
                     "role": "assistant",
-                    "content": response.content if hasattr(response, 'content') else str(response)
+                    "content": extract_content(response)
                 })
                 
                 st.rerun()
@@ -1579,11 +1846,42 @@ def main() -> None:
             if api_key:
                 st.success("OpenAI API Key provided!")
                 st.session_state.api_key = api_key
+                os.environ["OPENAI_API_KEY"] = api_key
             else:
                 st.warning("Please enter your OpenAI API Key to use OpenAI models.")
         else:  # Google Gemini
-            st.success("Using Google Gemini - No API key required!")
-            st.session_state.api_key = st.secrets.get("GOOGLE_API_KEY")
+            st.markdown("## Google API Key")
+            try:
+                secret_google_key = st.secrets.get("GOOGLE_API_KEY", "")
+            except Exception:
+                secret_google_key = ""
+            typed_key = st.text_input(
+                "Enter your Google API Key:",
+                type="password",
+                key="google_api_key_input",
+                help="Used for Gemini chat + embeddings. Falls back to GOOGLE_API_KEY in secrets if left blank.",
+            )
+            api_key = typed_key or secret_google_key
+            if api_key:
+                st.success("Google API Key provided!")
+                st.session_state.api_key = api_key
+                os.environ["GOOGLE_API_KEY"] = api_key
+            else:
+                st.session_state.api_key = ""
+                st.warning("Please enter your Google API Key to use Gemini models.")
+
+        # Model selection — let the user pick which model to use for the chosen
+        # provider. Reset to the provider's default whenever the provider changes.
+        default_model = "gpt-4o-mini" if llm_provider == "OpenAI" else "gemini-3.1-flash-lite"
+        if st.session_state.get("_model_provider_prev") != llm_provider:
+            st.session_state["model_name_input"] = default_model
+            st.session_state["_model_provider_prev"] = llm_provider
+        model_name = st.text_input(
+            f"{llm_provider} model name:",
+            key="model_name_input",
+            help="e.g. gemini-3.1-flash-lite, gemini-2.0-flash, gemini-1.5-pro · gpt-4o-mini, gpt-4o",
+        )
+        st.session_state.model_name = (model_name or default_model).strip()
             
         st.markdown("---")
         # Determine which steps are available
